@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">🔥 microGPT</h1>
+  <h1 align="center">microGPT</h1>
   <p align="center"><strong>Train your own LLM from scratch — with every frontier innovation</strong></p>
   <p align="center">
     <em>GPT-4 • DeepSeek V3 • Gemma 2 • Mistral • LLaMA 3 — Zero abstraction. Pure PyTorch.</em>
