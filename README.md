@@ -54,7 +54,7 @@ git clone https://github.com/viralcode/nanoforge.git
 cd nanoforge
 pip install torch numpy
 
-# Prepare data (downloads Shakespeare sample, uses GPT-4's BPE tokenizer)
+# Prepare data (included Shakespeare dataset, or use your own)
 python data/prepare_data.py
 
 # Train a small model (works on CPU/laptop)
@@ -63,6 +63,38 @@ python train.py --preset small
 # Generate text
 python generate.py --prompt "To be or not to be" --interactive
 ```
+
+## Example Output
+
+Trained on Shakespeare (~1MB of text) with the `small` preset on a MacBook:
+
+```
+$ python generate.py --prompt "To be or not to be" --top-p 0.9
+
+To be or not to be ta'en of the tomb:
+I'll pay not to see your honour's love.
+
+LADY CAPULET:
+You would have you sorrow to my heart did lie.
+
+Nurse:
+And that's the prince still tell you have said
+And you for your mistre
+```
+
+```
+$ python generate.py --prompt "ROMEO:" --top-p 0.9 --min-p 0.05 --rep-penalty 1.1
+
+ROMEO:
+Ay, so much lengthen'd with such a happy great father.
+
+JULIET:
+I would you call thee that he is so,
+So many some content to the balm of Edward;
+That had not fly thee to shake the noble duke.
+```
+
+> **10.6M params • val loss 1.479 • 49 tokens/sec on CPU • trained in ~45 min**
 
 ### Train on Your Own Data
 

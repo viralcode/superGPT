@@ -8,11 +8,7 @@ venv/
 env/
 .venv/
 
-# Training data and checkpoints
-data/input.txt
-data/train.bin
-data/val.bin
-data/meta.pkl
+# Training checkpoints (too large for git, use GitHub Releases)
 checkpoints/
 *.pt
 
