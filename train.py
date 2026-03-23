@@ -462,6 +462,12 @@ if __name__ == "__main__":
     parser.add_argument("--lr-schedule", type=str, default="cosine",
                         choices=["cosine", "wsd"],
                         help="LR schedule: cosine (default) or wsd (warmup-stable-decay)")
+    parser.add_argument("--streaming", action="store_true",
+                        help="Use streaming data pipeline instead of memmap")
+    parser.add_argument("--hf-dataset", type=str, default=None,
+                        help="HuggingFace dataset to stream from (e.g., HuggingFaceFW/fineweb)")
+    parser.add_argument("--shard-dir", type=str, default=None,
+                        help="Directory containing .bin shard files for streaming")
 
     args = parser.parse_args()
 
@@ -480,4 +486,40 @@ if __name__ == "__main__":
         lr_schedule=args.lr_schedule,
     )
 
+    # If streaming is requested, monkey-patch load_data with streaming loader
+    if args.streaming or args.hf_dataset or args.shard_dir:
+        try:
+            from streaming import create_streaming_dataloader
+            _stream_loader = create_streaming_dataloader(
+                block_size=model_config.block_size,
+                batch_size=train_config.batch_size,
+                hf_dataset=args.hf_dataset,
+                shard_dir=args.shard_dir or args.data_dir,
+            )
+            _stream_iter = iter(_stream_loader)
+
+            # Override load_data to pull from streaming
+            _original_load_data = load_data
+            def load_data_streaming(data_dir, split, block_size, batch_size, device):
+                nonlocal _stream_iter
+                try:
+                    batch = next(_stream_iter)
+                except StopIteration:
+                    _stream_iter = iter(_stream_loader)
+                    batch = next(_stream_iter)
+                x, y = batch[:, :-1], batch[:, 1:]
+                return x.to(device), y.to(device)
+
+            # Patch the global
+            import types
+            globals()['load_data'] = load_data_streaming
+            print(f"Streaming mode enabled")
+            if args.hf_dataset:
+                print(f"  HF dataset: {args.hf_dataset}")
+            elif args.shard_dir:
+                print(f"  Shard dir: {args.shard_dir}")
+        except ImportError:
+            print("Warning: streaming.py not found, falling back to memmap")
+
     train(model_config, train_config)
+

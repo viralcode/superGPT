@@ -420,32 +420,68 @@ def _apply_tp_to_layer(layer, mesh: ParallelMesh):
     """Apply tensor parallelism to a single transformer layer.
 
     Replaces nn.Linear layers with ColumnParallel/RowParallel equivalents.
+    Handles both GQA (q_proj/k_proj/v_proj/c_proj) and MLA attention variants.
     """
     attn = layer.attn
 
-    # For standard attention: Q, K, V are column-parallel, output is row-parallel
-    if hasattr(attn, 'c_attn'):
-        in_f = attn.c_attn.in_features
-        out_f = attn.c_attn.out_features
-        attn.c_attn = ColumnParallelLinear(
-            in_f, out_f, mesh.tp_group, mesh.tp_size,
-        )
+    # GQA attention: q_proj, k_proj, v_proj are column-parallel, c_proj is row-parallel
+    for proj_name in ['q_proj', 'k_proj', 'v_proj']:
+        proj = getattr(attn, proj_name, None)
+        if isinstance(proj, nn.Linear):
+            in_f = proj.in_features
+            out_f = proj.out_features
+            if out_f % mesh.tp_size == 0:
+                setattr(attn, proj_name, ColumnParallelLinear(
+                    in_f, out_f, mesh.tp_group, mesh.tp_size,
+                ))
 
-    if hasattr(attn, 'c_proj'):
+    if hasattr(attn, 'c_proj') and isinstance(attn.c_proj, nn.Linear):
         in_f = attn.c_proj.in_features
         out_f = attn.c_proj.out_features
-        attn.c_proj = RowParallelLinear(
-            in_f, out_f, mesh.tp_group, mesh.tp_size,
-        )
+        if in_f % mesh.tp_size == 0:
+            attn.c_proj = RowParallelLinear(
+                in_f, out_f, mesh.tp_group, mesh.tp_size,
+            )
+
+    # MLA attention: wq_a, wq_b, wkv_a, wkv_b, wo
+    for proj_name in ['wq_a', 'wq_b', 'wkv_a', 'wkv_b']:
+        proj = getattr(attn, proj_name, None)
+        if isinstance(proj, nn.Linear):
+            in_f = proj.in_features
+            out_f = proj.out_features
+            if out_f % mesh.tp_size == 0:
+                setattr(attn, proj_name, ColumnParallelLinear(
+                    in_f, out_f, mesh.tp_group, mesh.tp_size,
+                ))
+
+    if hasattr(attn, 'wo') and isinstance(attn.wo, nn.Linear):
+        in_f = attn.wo.in_features
+        out_f = attn.wo.out_features
+        if in_f % mesh.tp_size == 0:
+            attn.wo = RowParallelLinear(
+                in_f, out_f, mesh.tp_group, mesh.tp_size,
+            )
+
+    # Also handle fused c_attn if present (some model variants)
+    if hasattr(attn, 'c_attn') and isinstance(attn.c_attn, nn.Linear):
+        in_f = attn.c_attn.in_features
+        out_f = attn.c_attn.out_features
+        if out_f % mesh.tp_size == 0:
+            attn.c_attn = ColumnParallelLinear(
+                in_f, out_f, mesh.tp_group, mesh.tp_size,
+            )
 
     # FFN: w1, w3 are column-parallel, w2 is row-parallel
     ffn = layer.ffn
-    if hasattr(ffn, 'w1'):
+    if hasattr(ffn, 'w1') and isinstance(ffn.w1, nn.Linear):
         in_f = ffn.w1.in_features
         out_f = ffn.w1.out_features
-        ffn.w1 = ColumnParallelLinear(in_f, out_f, mesh.tp_group, mesh.tp_size)
-        ffn.w3 = ColumnParallelLinear(in_f, out_f, mesh.tp_group, mesh.tp_size)
-        ffn.w2 = RowParallelLinear(out_f, in_f, mesh.tp_group, mesh.tp_size)
+        if out_f % mesh.tp_size == 0:
+            ffn.w1 = ColumnParallelLinear(in_f, out_f, mesh.tp_group, mesh.tp_size)
+        if hasattr(ffn, 'w3') and isinstance(ffn.w3, nn.Linear):
+            ffn.w3 = ColumnParallelLinear(in_f, out_f, mesh.tp_group, mesh.tp_size)
+        if hasattr(ffn, 'w2') and isinstance(ffn.w2, nn.Linear):
+            ffn.w2 = RowParallelLinear(out_f, in_f, mesh.tp_group, mesh.tp_size)
 
 
 def get_parallel_args(parser):

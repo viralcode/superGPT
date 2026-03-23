@@ -104,54 +104,6 @@ def load_preferences(data_path: str):
     return preferences
 
 
-def compute_log_probs(model, input_ids, target_ids, device):
-    """Compute per-token log probabilities for a sequence.
-
-    Args:
-        model: GPT model
-        input_ids: input token IDs (1D tensor)
-        target_ids: target token IDs (1D tensor, shifted by 1)
-        device: computation device
-
-    Returns:
-        total log probability of the target sequence
-    """
-    input_ids = input_ids.unsqueeze(0).to(device)
-    target_ids = target_ids.unsqueeze(0).to(device)
-
-    logits, _ = model(input_ids)
-    # logits shape: (1, T, vocab_size) when targets not provided via model()
-    # But we passed no targets, so it only returns last token logits.
-    # We need full logits, so use forward with targets=None but full sequence
-    logits = model.lm_head(model.transformer.ln_f(
-        _forward_blocks(model, input_ids)
-    ))
-
-    # Compute log probs for each target token
-    log_probs = F.log_softmax(logits, dim=-1)
-    # Gather the log probs of the actual target tokens
-    target_log_probs = log_probs.squeeze(0).gather(1, target_ids.squeeze(0).unsqueeze(-1)).squeeze(-1)
-
-    return target_log_probs.sum()
-
-
-def _forward_blocks(model, idx):
-    """Run input through transformer blocks (without LM head)."""
-    B, T = idx.size()
-    tok_emb = model.transformer.wte(idx)
-
-    if model.transformer.wpe is not None:
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
-        x = model.transformer.drop(tok_emb + model.transformer.wpe(pos))
-    else:
-        x = model.transformer.drop(tok_emb)
-
-    for block in model.transformer.h:
-        x, _ = block(x)
-
-    return x
-
-
 def dpo_loss(
     policy_model,
     ref_model,

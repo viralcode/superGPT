@@ -148,7 +148,7 @@ PRESETS = {
         score_func="sigmoid", route_scale=1.0,
         aux_loss_free=True, bias_update_speed=0.001,
         # MTP
-        n_predict_tokens=1,
+        n_predict_tokens=3,
     ),
     "mistral": GPTConfig(
         n_layer=32, n_head=32, n_kv_head=8, n_embd=4096,

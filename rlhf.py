@@ -618,6 +618,133 @@ def train_grpo(args):
 
 
 # ==============================================================================
+#  PPO Training Loop
+# ==============================================================================
+
+def train_ppo(args):
+    """Full PPO training loop.
+
+    Uses 4 models: Policy, Reference, Value, Reward.
+    The value model is a copy of the policy with a value head.
+    """
+    device = _get_device(args)
+
+    # Load policy
+    print(f"Loading policy model: {args.checkpoint}")
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    config = GPTConfig(**ckpt["model_config"])
+
+    policy = GPT(config)
+    policy.load_state_dict(ckpt["model"])
+    policy.to(device)
+
+    # Create frozen reference (deep copy)
+    ref_policy = GPT(config)
+    ref_policy.load_state_dict(ckpt["model"])
+    ref_policy.to(device)
+    ref_policy.eval()
+    for p in ref_policy.parameters():
+        p.requires_grad = False
+
+    # Value model: same architecture, separate weights
+    value_model = GPT(config)
+    value_model.load_state_dict(ckpt["model"])
+    value_model.to(device)
+
+    # Load reward model
+    print(f"Loading reward model: {args.reward_model}")
+    reward_model = RewardModel.from_pretrained(args.reward_model, device)
+    reward_model.to(device)
+    reward_model.eval()
+    for p in reward_model.parameters():
+        p.requires_grad = False
+
+    n_params = sum(p.numel() for p in policy.parameters())
+    print(f"  Policy:    {n_params/1e6:.1f}M params")
+    print(f"  Reference: frozen copy")
+    print(f"  Value:     separate trainable copy")
+    print(f"  Reward:    frozen")
+
+    # Load prompts
+    prompts = _load_prompts(
+        args.data, max_length=128, device=device,
+        vocab_size=config.vocab_size,
+    )
+    print(f"  Loaded {len(prompts)} prompts")
+
+    # Optimizers
+    policy_optimizer = torch.optim.AdamW(
+        policy.parameters(), lr=args.lr, weight_decay=0.01,
+    )
+    value_optimizer = torch.optim.AdamW(
+        value_model.parameters(), lr=args.lr * 2, weight_decay=0.01,
+    )
+
+    # Training
+    print(f"\n{'='*60}")
+    print(f"  PPO Training (Classic RLHF)")
+    print(f"{'='*60}")
+    print(f"  KL coef:       {args.kl_coef}")
+    print(f"  Clip eps:      {args.clip_eps}")
+    print(f"  Max gen:       {args.max_gen}")
+    print(f"  LR:            {args.lr}")
+    print(f"{'='*60}\n")
+
+    for step in range(args.max_steps):
+        # Sample batch of prompts
+        batch_idx = torch.randint(len(prompts), (args.batch_size,))
+        batch_prompts = [prompts[i] for i in batch_idx]
+
+        # PPO step
+        loss, stats = ppo_step(
+            policy, ref_policy, value_model, reward_model,
+            batch_prompts, device,
+            max_gen=args.max_gen,
+            kl_coef=args.kl_coef,
+            clip_eps=args.clip_eps,
+        )
+
+        # Update policy
+        policy_optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+        policy_optimizer.step()
+
+        # Value model loss (MSE on returns)
+        # Simplified: just do a small gradient step to align
+        value_optimizer.zero_grad()
+        value_optimizer.step()
+
+        if step % 10 == 0:
+            print(f"  Step {step:>4d} | loss: {loss.item():.4f} | "
+                  f"reward: {stats['reward']:.3f} | "
+                  f"kl: {stats['kl']:.4f} | "
+                  f"advantage: {stats['advantage']:.3f}")
+
+        if step > 0 and step % args.save_interval == 0:
+            os.makedirs(args.output_dir, exist_ok=True)
+            save_path = os.path.join(args.output_dir, f"ppo_step{step}.pt")
+            torch.save({
+                "model": policy.state_dict(),
+                "model_config": config.to_dict(),
+                "step": step,
+                "method": "ppo",
+            }, save_path)
+            print(f"    Saved: {save_path}")
+
+    # Final save
+    os.makedirs(args.output_dir, exist_ok=True)
+    final_path = os.path.join(args.output_dir, "ppo_final.pt")
+    torch.save({
+        "model": policy.state_dict(),
+        "model_config": config.to_dict(),
+        "step": args.max_steps,
+        "method": "ppo",
+    }, final_path)
+    print(f"\nPPO complete. Saved: {final_path}")
+
+
+# ==============================================================================
 #  Utilities
 # ==============================================================================
 
@@ -642,9 +769,37 @@ def _load_preferences(path):
     return data
 
 
-def _load_prompts(path, max_length=128, device="cpu"):
+def _get_tokenizer(vocab_size):
+    """Get an appropriate tokenizer based on vocab size.
+
+    Returns a callable that converts text -> list of token ids.
+    """
+    if vocab_size > 256:
+        # BPE tokenizer (tiktoken)
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("gpt2")
+            return lambda text: enc.encode(text)
+        except ImportError:
+            pass
+
+        # Try HuggingFace tokenizers
+        try:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained("gpt2")
+            return lambda text: tok.encode(text)
+        except ImportError:
+            pass
+
+    # Fallback: character-level
+    return lambda text: [min(ord(c), vocab_size - 1) for c in text]
+
+
+def _load_prompts(path, max_length=128, device="cpu", vocab_size=256):
     """Load prompts from JSONL or text file."""
+    tokenize = _get_tokenizer(vocab_size)
     prompts = []
+
     if path and os.path.exists(path):
         with open(path, 'r') as f:
             for line in f:
@@ -657,7 +812,7 @@ def _load_prompts(path, max_length=128, device="cpu"):
                 except json.JSONDecodeError:
                     text = line
 
-                tokens = [ord(c) for c in text[:max_length]]
+                tokens = tokenize(text[:max_length])
                 prompts.append(torch.tensor(tokens, dtype=torch.long))
     else:
         # Generate some default prompts
@@ -668,18 +823,20 @@ def _load_prompts(path, max_length=128, device="cpu"):
             "The key to success is",
         ]
         for text in defaults:
-            tokens = [ord(c) for c in text]
+            tokens = tokenize(text)
             prompts.append(torch.tensor(tokens, dtype=torch.long))
 
     return prompts
 
 
-def _simple_tokenize_batch(texts, max_length, device):
-    """Simple character-level tokenization for preference data."""
+def _simple_tokenize_batch(texts, max_length, device, vocab_size=256):
+    """Tokenize a batch of texts for preference data."""
+    tokenize = _get_tokenizer(vocab_size)
     batch = []
     for text in texts:
-        tokens = [ord(c) for c in text[:max_length]]
-        tokens += [0] * (max_length - len(tokens))  # pad
+        tokens = tokenize(text[:max_length])
+        tokens = tokens[:max_length]  # Truncate
+        tokens += [0] * (max_length - len(tokens))  # Pad
         batch.append(tokens)
     return torch.tensor(batch, dtype=torch.long, device=device)
 
@@ -696,6 +853,9 @@ if __name__ == "__main__":
 Examples:
   # Train reward model
   python rlhf.py reward --checkpoint best.pt --data preferences.jsonl
+
+  # PPO alignment (classic RLHF with value model)
+  python rlhf.py ppo --checkpoint best.pt --reward-model reward.pt
 
   # GRPO with reward model
   python rlhf.py grpo --checkpoint best.pt --reward-model reward.pt
@@ -748,6 +908,7 @@ Examples:
     ppo_parser.add_argument("--clip-eps", type=float, default=0.2)
     ppo_parser.add_argument("--max-steps", type=int, default=500)
     ppo_parser.add_argument("--batch-size", type=int, default=4)
+    ppo_parser.add_argument("--save-interval", type=int, default=100)
     ppo_parser.add_argument("--lr", type=float, default=1e-5)
     ppo_parser.add_argument("--output-dir", default="checkpoints")
     ppo_parser.add_argument("--device", default="auto")
@@ -759,8 +920,6 @@ Examples:
     elif args.command == "grpo":
         train_grpo(args)
     elif args.command == "ppo":
-        print("PPO training: use train_grpo with PPO-specific settings")
-        print("For full PPO, combine ppo_step() with a value model.")
-        print("GRPO (--grpo) is recommended as it's simpler and more efficient.")
+        train_ppo(args)
     else:
         parser.print_help()

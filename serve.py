@@ -212,11 +212,16 @@ class GenerationRequest:
 
 
 class ContinuousBatcher:
-    """Continuous batching scheduler.
+    """Continuous batching scheduler with PagedAttention.
 
     Dynamically batches and unbatches sequences as they start and finish
     generation. New sequences can join the batch without waiting for
     existing ones to complete.
+
+    Uses PagedKVCache for memory-efficient KV-cache management:
+    - Fixed-size blocks eliminate fragmentation
+    - Sequences only allocate blocks as they grow
+    - Freed blocks are recycled immediately
     """
 
     def __init__(self, model: GPT, max_batch: int = 32, max_seq_len: int = 512,
@@ -227,11 +232,26 @@ class ContinuousBatcher:
         self.max_seq_len = max_seq_len
         self.device = device
 
+        # PagedKVCache for efficient KV management
+        config = model.config
+        n_heads = getattr(config, 'n_kv_head', config.n_head) or config.n_head
+        head_dim = config.n_embd // config.n_head
+        self.kv_cache = PagedKVCache(
+            n_layers=config.n_layer,
+            n_heads=n_heads,
+            head_dim=head_dim,
+            block_size=16,
+            max_blocks=max_batch * (max_seq_len // 16 + 1),
+            device=device,
+        )
+
         # Request queues
         self.pending: List[GenerationRequest] = []
         self.active: Dict[str, GenerationRequest] = {}
 
-        # Simple per-sequence KV cache (not paged for simplicity)
+        # Per-sequence state: full token history for context
+        self.seq_tokens: Dict[str, List[int]] = {}
+
         self.lock = threading.Lock()
 
     def add_request(self, req: GenerationRequest):
@@ -243,89 +263,131 @@ class ContinuousBatcher:
     def step(self):
         """Process one generation step for all active sequences.
 
-        1. Admit pending requests (up to max_batch)
-        2. Run forward pass for all active sequences
+        1. Admit pending requests and run prefill (process full prompt)
+        2. For continuing sequences, run decode (single token)
         3. Sample next tokens
-        4. Remove finished sequences
+        4. Remove finished sequences and free their KV blocks
         """
+        # Admit new requests
+        newly_admitted = []
         with self.lock:
-            # Admit new requests
             while self.pending and len(self.active) < self.max_batch:
                 req = self.pending.pop(0)
                 self.active[req.id] = req
+                self.seq_tokens[req.id] = list(req.prompt_tokens)
+                newly_admitted.append(req.id)
 
         if not self.active:
             return False  # Nothing to do
 
-        # Collect input tokens (last token for each active sequence)
-        batch_ids = []
-        batch_tokens = []
-
-        for req_id, req in list(self.active.items()):
-            if req.generated_tokens:
-                # Continuing: use last generated token
-                token = req.generated_tokens[-1]
-            elif req.prompt_tokens:
-                # First step: process full prompt
-                # For simplicity, just use last prompt token
-                token = req.prompt_tokens[-1]
-            else:
+        # Phase 1: Prefill — process full prompts for newly admitted sequences
+        for req_id in newly_admitted:
+            req = self.active[req_id]
+            if not req.prompt_tokens:
                 continue
 
-            batch_ids.append(req_id)
-            batch_tokens.append(token)
+            # Allocate KV blocks for the prompt
+            self.kv_cache.allocate(req_id, len(req.prompt_tokens))
 
-        if not batch_tokens:
-            return False
+            # Run full prompt through the model
+            prompt_ids = torch.tensor(
+                req.prompt_tokens, dtype=torch.long, device=self.device
+            ).unsqueeze(0)  # (1, T)
 
-        # Build input tensor
-        input_ids = torch.tensor(batch_tokens, dtype=torch.long,
-                                  device=self.device).unsqueeze(1)  # (B, 1)
+            logits, _ = self.model(prompt_ids)
+            token_logits = logits[0, -1, :]  # Last position logits
 
-        # Forward pass
-        logits, _ = self.model(input_ids)  # (B, 1, V)
-        logits = logits[:, -1, :]  # (B, V)
-
-        # Sample for each sequence
-        for i, req_id in enumerate(batch_ids):
-            req = self.active[req_id]
-            token_logits = logits[i]
-
-            # Temperature
-            if req.temperature > 0:
-                token_logits = token_logits / req.temperature
-
-            # Top-k
-            if req.top_k > 0:
-                v, _ = torch.topk(token_logits, min(req.top_k, token_logits.size(-1)))
-                token_logits[token_logits < v[-1]] = float('-inf')
-
-            # Top-p
-            if req.top_p < 1.0:
-                sorted_logits, sorted_idx = torch.sort(token_logits, descending=True)
-                probs = F.softmax(sorted_logits, dim=-1)
-                cumsum = torch.cumsum(probs, dim=-1)
-                mask = cumsum - probs > req.top_p
-                sorted_logits[mask] = float('-inf')
-                token_logits = sorted_logits.scatter(0, sorted_idx, sorted_logits)
-
-            # Sample
-            probs = F.softmax(token_logits, dim=-1)
-            next_token = torch.multinomial(probs, 1).item()
-
+            # Sample first token
+            next_token = self._sample(token_logits, req)
             req.generated_tokens.append(next_token)
+            self.seq_tokens[req_id].append(next_token)
 
-            # Check stopping conditions
             if len(req.generated_tokens) >= req.max_tokens:
                 req.finished = True
 
-        # Remove finished sequences
+        # Phase 2: Decode — one token per continuing sequence
+        continuing = [
+            rid for rid in self.active
+            if rid not in newly_admitted and not self.active[rid].finished
+        ]
+
+        if continuing:
+            # Build a batch of last tokens for all continuing sequences
+            batch_ids = []
+            batch_inputs = []
+
+            for req_id in continuing:
+                req = self.active[req_id]
+                # Build full context (or truncated to block_size)
+                all_tokens = self.seq_tokens[req_id]
+                ctx = all_tokens[-self.model.config.block_size:]
+                batch_ids.append(req_id)
+                batch_inputs.append(ctx)
+
+            # Pad to same length for batching
+            max_len = max(len(t) for t in batch_inputs)
+            padded = []
+            for tokens in batch_inputs:
+                padded.append([0] * (max_len - len(tokens)) + tokens)
+
+            input_ids = torch.tensor(padded, dtype=torch.long, device=self.device)
+
+            # Forward pass
+            logits, _ = self.model(input_ids)
+
+            # Sample for each sequence (use the last non-pad position)
+            for i, req_id in enumerate(batch_ids):
+                req = self.active[req_id]
+                seq_len = len(batch_inputs[i])
+                # Logits at the last real token position
+                token_logits = logits[i, -1, :]
+
+                next_token = self._sample(token_logits, req)
+                req.generated_tokens.append(next_token)
+                self.seq_tokens[req_id].append(next_token)
+
+                # Extend KV allocation
+                total_tokens = len(self.seq_tokens[req_id])
+                try:
+                    self.kv_cache.allocate(req_id, total_tokens)
+                except RuntimeError:
+                    req.finished = True  # Out of KV blocks
+
+                if len(req.generated_tokens) >= req.max_tokens:
+                    req.finished = True
+
+        # Remove finished sequences and free their KV blocks
         with self.lock:
             finished = [rid for rid, req in self.active.items() if req.finished]
             for rid in finished:
+                self.kv_cache.free(rid)
+                if rid in self.seq_tokens:
+                    del self.seq_tokens[rid]
                 del self.active[rid]
 
         return True
+
+    def _sample(self, token_logits, req):
+        """Sample a token from logits with temperature, top-k, top-p."""
+        if req.temperature > 0:
+            token_logits = token_logits / req.temperature
+
+        # Top-k
+        if req.top_k > 0:
+            v, _ = torch.topk(token_logits, min(req.top_k, token_logits.size(-1)))
+            token_logits[token_logits < v[-1]] = float('-inf')
+
+        # Top-p
+        if req.top_p < 1.0:
+            sorted_logits, sorted_idx = torch.sort(token_logits, descending=True)
+            probs = F.softmax(sorted_logits, dim=-1)
+            cumsum = torch.cumsum(probs, dim=-1)
+            mask = cumsum - probs > req.top_p
+            sorted_logits[mask] = float('-inf')
+            token_logits = sorted_logits.scatter(0, sorted_idx, sorted_logits)
+
+        probs = F.softmax(token_logits, dim=-1)
+        return torch.multinomial(probs, 1).item()
 
     def generation_loop(self, poll_interval: float = 0.01):
         """Main generation loop — runs in a background thread."""

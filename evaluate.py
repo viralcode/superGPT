@@ -11,6 +11,10 @@ Supported benchmarks:
   - GSM8K: grade school math
   - HumanEval: code generation
 
+Data sources:
+  - Automatically downloads from HuggingFace datasets if available
+  - Falls back to built-in sample questions for offline use
+
 Usage:
     # Run all benchmarks
     python evaluate.py --checkpoint checkpoints/best.pt
@@ -23,6 +27,9 @@ Usage:
 
     # Save results to JSON
     python evaluate.py --checkpoint best.pt --output results.json
+
+    # Limit number of tasks per benchmark (for speed)
+    python evaluate.py --checkpoint best.pt --max-tasks 100
 
 Reference:
     lm-evaluation-harness, OpenAI Evals
@@ -43,6 +50,22 @@ from model import GPT
 
 
 # ==============================================================================
+#  HuggingFace Dataset Loading
+# ==============================================================================
+
+def _try_load_hf_dataset(name, split, **kwargs):
+    """Try to load a HuggingFace dataset. Returns None if unavailable."""
+    try:
+        from datasets import load_dataset
+        ds = load_dataset(name, split=split, trust_remote_code=True, **kwargs)
+        return ds
+    except Exception as e:
+        print(f"  [Note] Could not load HF dataset '{name}': {e}")
+        print(f"  [Note] Using built-in sample questions instead.")
+        return None
+
+
+# ==============================================================================
 #  Base Benchmark Class
 # ==============================================================================
 
@@ -52,8 +75,9 @@ class Benchmark:
     name: str = "base"
     description: str = ""
 
-    def __init__(self, n_shot: int = 0):
+    def __init__(self, n_shot: int = 0, max_tasks: int = 0):
         self.n_shot = n_shot
+        self.max_tasks = max_tasks
 
     def get_tasks(self) -> List[Dict]:
         """Return list of evaluation tasks."""
@@ -75,114 +99,81 @@ class Benchmark:
 class MMLUBenchmark(Benchmark):
     """MMLU: Multiple choice questions across 57 subjects.
 
-    Tests broad knowledge and reasoning across STEM, humanities,
-    social sciences, and more.
+    Data source: HuggingFace cais/mmlu (14K test questions)
+    Fallback: built-in sample questions
     """
 
     name = "mmlu"
     description = "Massive Multitask Language Understanding (57 subjects)"
 
-    SUBJECTS = [
-        "abstract_algebra", "anatomy", "astronomy", "business_ethics",
-        "clinical_knowledge", "college_biology", "college_chemistry",
-        "college_computer_science", "college_mathematics", "college_medicine",
-        "college_physics", "computer_security", "conceptual_physics",
-        "econometrics", "electrical_engineering", "elementary_mathematics",
-        "formal_logic", "global_facts", "high_school_biology",
-        "high_school_chemistry", "high_school_computer_science",
-        "high_school_european_history", "high_school_geography",
-        "high_school_government_and_politics", "high_school_macroeconomics",
-        "high_school_mathematics", "high_school_microeconomics",
-        "high_school_physics", "high_school_psychology",
-        "high_school_statistics", "high_school_us_history",
-        "high_school_world_history", "human_aging", "human_sexuality",
-        "international_law", "jurisprudence", "logical_fallacies",
-        "machine_learning", "management", "marketing", "medical_genetics",
-        "miscellaneous", "moral_disputes", "moral_scenarios", "nutrition",
-        "philosophy", "prehistory", "professional_accounting",
-        "professional_law", "professional_medicine", "professional_psychology",
-        "public_relations", "security_studies", "sociology",
-        "us_foreign_policy", "virology", "world_religions",
-    ]
-
     SAMPLE_QUESTIONS = [
-        {
-            "question": "Which of the following is NOT a component of GDP?",
-            "choices": ["Consumption", "Investment", "Government spending", "Population"],
-            "answer": "D",
-            "subject": "economics",
-        },
-        {
-            "question": "What is the derivative of sin(x)?",
-            "choices": ["cos(x)", "-cos(x)", "sin(x)", "-sin(x)"],
-            "answer": "A",
-            "subject": "mathematics",
-        },
-        {
-            "question": "The process by which plants convert sunlight to energy is called:",
-            "choices": ["Respiration", "Photosynthesis", "Fermentation", "Osmosis"],
-            "answer": "B",
-            "subject": "biology",
-        },
-        {
-            "question": "In Python, what does 'len()' return for a string?",
-            "choices": ["Bytes", "Characters", "Words", "Lines"],
-            "answer": "B",
-            "subject": "computer_science",
-        },
-        {
-            "question": "The Pythagorean theorem states that:",
-            "choices": ["a+b=c", "a^2+b^2=c^2", "a*b=c", "a/b=c"],
-            "answer": "B",
-            "subject": "mathematics",
-        },
-        {
-            "question": "Which planet is known as the Red Planet?",
-            "choices": ["Venus", "Mars", "Jupiter", "Saturn"],
-            "answer": "B",
-            "subject": "astronomy",
-        },
-        {
-            "question": "What is the capital of France?",
-            "choices": ["London", "Berlin", "Madrid", "Paris"],
-            "answer": "D",
-            "subject": "geography",
-        },
-        {
-            "question": "RNA differs from DNA in that RNA contains:",
-            "choices": ["Thymine", "Uracil", "Guanine", "Cytosine"],
-            "answer": "B",
-            "subject": "biology",
-        },
+        {"question": "Which of the following is NOT a component of GDP?",
+         "choices": ["Consumption", "Investment", "Government spending", "Population"],
+         "answer": "D", "subject": "economics"},
+        {"question": "What is the derivative of sin(x)?",
+         "choices": ["cos(x)", "-cos(x)", "sin(x)", "-sin(x)"],
+         "answer": "A", "subject": "mathematics"},
+        {"question": "The process by which plants convert sunlight to energy is called:",
+         "choices": ["Respiration", "Photosynthesis", "Fermentation", "Osmosis"],
+         "answer": "B", "subject": "biology"},
+        {"question": "In Python, what does 'len()' return for a string?",
+         "choices": ["Bytes", "Characters", "Words", "Lines"],
+         "answer": "B", "subject": "computer_science"},
+        {"question": "The Pythagorean theorem states that:",
+         "choices": ["a+b=c", "a^2+b^2=c^2", "a*b=c", "a/b=c"],
+         "answer": "B", "subject": "mathematics"},
+        {"question": "Which planet is known as the Red Planet?",
+         "choices": ["Venus", "Mars", "Jupiter", "Saturn"],
+         "answer": "B", "subject": "astronomy"},
+        {"question": "What is the capital of France?",
+         "choices": ["London", "Berlin", "Madrid", "Paris"],
+         "answer": "D", "subject": "geography"},
+        {"question": "RNA differs from DNA in that RNA contains:",
+         "choices": ["Thymine", "Uracil", "Guanine", "Cytosine"],
+         "answer": "B", "subject": "biology"},
     ]
 
     def get_tasks(self):
-        # Use built-in sample questions
-        # In production, load from HuggingFace datasets
+        # Try loading from HuggingFace
+        ds = _try_load_hf_dataset("cais/mmlu", "test", name="all")
+        if ds is not None:
+            tasks = []
+            for item in ds:
+                choices = item.get("choices", [])
+                answer_idx = item.get("answer", 0)
+                if isinstance(answer_idx, int) and 0 <= answer_idx < len(choices):
+                    answer_letter = chr(65 + answer_idx)
+                else:
+                    answer_letter = str(answer_idx)
+                tasks.append({
+                    "question": item["question"],
+                    "choices": choices,
+                    "answer": answer_letter,
+                    "subject": item.get("subject", "unknown"),
+                })
+            if self.max_tasks > 0:
+                tasks = tasks[:self.max_tasks]
+            return tasks
         return self.SAMPLE_QUESTIONS
 
     def format_prompt(self, task, few_shot_examples=None):
         prompt = ""
-
-        # Add few-shot examples
         if few_shot_examples:
             for ex in few_shot_examples[:self.n_shot]:
                 prompt += self._format_question(ex) + f"\nAnswer: {ex['answer']}\n\n"
-
         prompt += self._format_question(task) + "\nAnswer:"
         return prompt
 
     def _format_question(self, task):
         q = f"Question: {task['question']}\n"
         for i, choice in enumerate(task["choices"]):
-            letter = chr(65 + i)  # A, B, C, D
+            letter = chr(65 + i)
             q += f"  {letter}. {choice}\n"
         return q
 
     def score(self, task, model_output):
-        # Extract the letter answer from model output
         output = model_output.strip().upper()
-        if output and output[0] in "ABCD":
+        if output and output[0] in "ABCDEFGHIJ":
             return output[0] == task["answer"]
         return False
 
@@ -194,46 +185,49 @@ class MMLUBenchmark(Benchmark):
 class HellaSwagBenchmark(Benchmark):
     """HellaSwag: Choose the most plausible continuation.
 
-    Tests commonsense reasoning about everyday events.
+    Data source: HuggingFace Rowan/hellaswag (10K validation)
+    Fallback: built-in sample questions
     """
 
     name = "hellaswag"
     description = "Commonsense reasoning (sentence completion)"
 
     SAMPLE_TASKS = [
-        {
-            "context": "A person is seen sitting on a roof. They start to play a beat on a set of bongos.",
-            "choices": [
-                "They continue to play and eventually stop to take a break.",
-                "They fly off the roof into the sky.",
-                "A ball rolls into the scene and hits them.",
-                "An orchestra appears behind them.",
-            ],
-            "answer": 0,
-        },
-        {
-            "context": "A chef walks into a kitchen. They pick up a knife and a cutting board.",
-            "choices": [
-                "They begin to chop vegetables for a salad.",
-                "They start painting the walls with the knife.",
-                "They use the cutting board as a surfboard.",
-                "A horse walks through the kitchen door.",
-            ],
-            "answer": 0,
-        },
-        {
-            "context": "A student opens a textbook to study for an exam.",
-            "choices": [
-                "They use it as a pillow instead.",
-                "They highlight key passages and take notes.",
-                "The book transforms into a bird.",
-                "They eat the textbook.",
-            ],
-            "answer": 1,
-        },
+        {"context": "A person is seen sitting on a roof. They start to play a beat on a set of bongos.",
+         "choices": ["They continue to play and eventually stop to take a break.",
+                     "They fly off the roof into the sky.",
+                     "A ball rolls into the scene and hits them.",
+                     "An orchestra appears behind them."],
+         "answer": 0},
+        {"context": "A chef walks into a kitchen. They pick up a knife and a cutting board.",
+         "choices": ["They begin to chop vegetables for a salad.",
+                     "They start painting the walls with the knife.",
+                     "They use the cutting board as a surfboard.",
+                     "A horse walks through the kitchen door."],
+         "answer": 0},
+        {"context": "A student opens a textbook to study for an exam.",
+         "choices": ["They use it as a pillow instead.",
+                     "They highlight key passages and take notes.",
+                     "The book transforms into a bird.",
+                     "They eat the textbook."],
+         "answer": 1},
     ]
 
     def get_tasks(self):
+        ds = _try_load_hf_dataset("Rowan/hellaswag", "validation")
+        if ds is not None:
+            tasks = []
+            for item in ds:
+                endings = item.get("endings", [])
+                label = item.get("label", "0")
+                tasks.append({
+                    "context": item.get("ctx", item.get("activity_label", "")),
+                    "choices": endings,
+                    "answer": int(label) if str(label).isdigit() else 0,
+                })
+            if self.max_tasks > 0:
+                tasks = tasks[:self.max_tasks]
+            return tasks
         return self.SAMPLE_TASKS
 
     def format_prompt(self, task, few_shot_examples=None):
@@ -265,30 +259,41 @@ class HellaSwagBenchmark(Benchmark):
 # ==============================================================================
 
 class ARCBenchmark(Benchmark):
-    """ARC: Science questions from grade school and middle school."""
+    """ARC: Science questions from grade school and middle school.
+
+    Data source: HuggingFace allenai/ai2_arc (ARC-Challenge test set)
+    Fallback: built-in sample questions
+    """
 
     name = "arc"
     description = "AI2 Reasoning Challenge (science questions)"
 
     SAMPLE_TASKS = [
-        {
-            "question": "Which property of a mineral can be determined just by looking at it?",
-            "choices": ["Luster", "Hardness", "Weight", "Streak"],
-            "answer": "A",
-        },
-        {
-            "question": "What is the main function of the roots of a plant?",
-            "choices": ["Make food", "Absorb water", "Make seeds", "Produce oxygen"],
-            "answer": "B",
-        },
-        {
-            "question": "Which of these represents a chemical change?",
-            "choices": ["Melting ice", "Burning wood", "Cutting paper", "Dissolving salt"],
-            "answer": "B",
-        },
+        {"question": "Which property of a mineral can be determined just by looking at it?",
+         "choices": ["Luster", "Hardness", "Weight", "Streak"], "answer": "A"},
+        {"question": "What is the main function of the roots of a plant?",
+         "choices": ["Make food", "Absorb water", "Make seeds", "Produce oxygen"], "answer": "B"},
+        {"question": "Which of these represents a chemical change?",
+         "choices": ["Melting ice", "Burning wood", "Cutting paper", "Dissolving salt"], "answer": "B"},
     ]
 
     def get_tasks(self):
+        ds = _try_load_hf_dataset("allenai/ai2_arc", "test", name="ARC-Challenge")
+        if ds is not None:
+            tasks = []
+            for item in ds:
+                choices_data = item.get("choices", {})
+                labels = choices_data.get("label", [])
+                texts = choices_data.get("text", [])
+                answer_key = item.get("answerKey", "A")
+                tasks.append({
+                    "question": item["question"],
+                    "choices": texts,
+                    "answer": answer_key,
+                })
+            if self.max_tasks > 0:
+                tasks = tasks[:self.max_tasks]
+            return tasks
         return self.SAMPLE_TASKS
 
     def format_prompt(self, task, few_shot_examples=None):
@@ -308,7 +313,7 @@ class ARCBenchmark(Benchmark):
 
     def score(self, task, model_output):
         output = model_output.strip().upper()
-        if output and output[0] in "ABCD":
+        if output and output[0] in "ABCDEFGHIJ":
             return output[0] == task["answer"]
         return False
 
@@ -318,27 +323,43 @@ class ARCBenchmark(Benchmark):
 # ==============================================================================
 
 class GSM8KBenchmark(Benchmark):
-    """GSM8K: Grade school math word problems."""
+    """GSM8K: Grade school math word problems.
+
+    Data source: HuggingFace openai/gsm8k (1.3K test)
+    Fallback: built-in sample questions
+    """
 
     name = "gsm8k"
     description = "Grade School Math (word problems)"
 
     SAMPLE_TASKS = [
-        {
-            "question": "Janet has 5 apples. She buys 3 more. How many apples does she have?",
-            "answer": "8",
-        },
-        {
-            "question": "A store has 20 shirts. If 7 are sold, how many remain?",
-            "answer": "13",
-        },
-        {
-            "question": "Tom runs 3 miles every day for 5 days. How many miles total?",
-            "answer": "15",
-        },
+        {"question": "Janet has 5 apples. She buys 3 more. How many apples does she have?",
+         "answer": "8"},
+        {"question": "A store has 20 shirts. If 7 are sold, how many remain?",
+         "answer": "13"},
+        {"question": "Tom runs 3 miles every day for 5 days. How many miles total?",
+         "answer": "15"},
     ]
 
     def get_tasks(self):
+        ds = _try_load_hf_dataset("openai/gsm8k", "test", name="main")
+        if ds is not None:
+            tasks = []
+            for item in ds:
+                # GSM8K answers are in format "... #### <number>"
+                answer_text = item.get("answer", "")
+                if "####" in answer_text:
+                    final_answer = answer_text.split("####")[-1].strip()
+                    final_answer = final_answer.replace(",", "")
+                else:
+                    final_answer = answer_text.strip()
+                tasks.append({
+                    "question": item["question"],
+                    "answer": final_answer,
+                })
+            if self.max_tasks > 0:
+                tasks = tasks[:self.max_tasks]
+            return tasks
         return self.SAMPLE_TASKS
 
     def format_prompt(self, task, few_shot_examples=None):
@@ -351,8 +372,8 @@ class GSM8KBenchmark(Benchmark):
         return prompt
 
     def score(self, task, model_output):
-        # Extract the last number from the output
         output = model_output.strip()
+        # Extract the last number from the output
         numbers = []
         current = ""
         for c in output:
@@ -366,7 +387,9 @@ class GSM8KBenchmark(Benchmark):
 
         if numbers:
             try:
-                return str(int(float(numbers[-1]))) == task["answer"]
+                predicted = str(int(float(numbers[-1])))
+                expected = str(int(float(task["answer"])))
+                return predicted == expected
             except ValueError:
                 pass
         return False
@@ -377,25 +400,40 @@ class GSM8KBenchmark(Benchmark):
 # ==============================================================================
 
 class TruthfulQABenchmark(Benchmark):
-    """TruthfulQA: Tests model's tendency to reproduce common misconceptions."""
+    """TruthfulQA: Tests model's tendency to reproduce common misconceptions.
+
+    Data source: HuggingFace truthfulqa/truthful_qa (generation split)
+    Fallback: built-in sample questions
+    """
 
     name = "truthfulqa"
     description = "Factual accuracy (common misconceptions)"
 
     SAMPLE_TASKS = [
-        {
-            "question": "What happens if you crack your knuckles?",
-            "good_answers": ["nothing harmful", "it makes a sound", "no long-term damage"],
-            "bad_answers": ["arthritis", "joint damage"],
-        },
-        {
-            "question": "Do humans only use 10% of their brains?",
-            "good_answers": ["no", "false", "we use all of our brain"],
-            "bad_answers": ["yes", "true", "we only use 10%"],
-        },
+        {"question": "What happens if you crack your knuckles?",
+         "good_answers": ["nothing harmful", "it makes a sound", "no long-term damage"],
+         "bad_answers": ["arthritis", "joint damage"]},
+        {"question": "Do humans only use 10% of their brains?",
+         "good_answers": ["no", "false", "we use all of our brain"],
+         "bad_answers": ["yes", "true", "we only use 10%"]},
     ]
 
     def get_tasks(self):
+        ds = _try_load_hf_dataset("truthfulqa/truthful_qa", "validation",
+                                  name="generation")
+        if ds is not None:
+            tasks = []
+            for item in ds:
+                correct = item.get("correct_answers", [])
+                incorrect = item.get("incorrect_answers", [])
+                tasks.append({
+                    "question": item["question"],
+                    "good_answers": correct if correct else ["yes"],
+                    "bad_answers": incorrect if incorrect else ["no"],
+                })
+            if self.max_tasks > 0:
+                tasks = tasks[:self.max_tasks]
+            return tasks
         return self.SAMPLE_TASKS
 
     def format_prompt(self, task, few_shot_examples=None):
@@ -403,7 +441,6 @@ class TruthfulQABenchmark(Benchmark):
 
     def score(self, task, model_output):
         output = model_output.lower().strip()
-        # Check if output contains good answers
         for good in task["good_answers"]:
             if good.lower() in output:
                 return True
@@ -415,30 +452,41 @@ class TruthfulQABenchmark(Benchmark):
 # ==============================================================================
 
 class HumanEvalBenchmark(Benchmark):
-    """HumanEval: Python code generation problems."""
+    """HumanEval: Python code generation problems.
+
+    Data source: HuggingFace openai/openai_humaneval
+    Fallback: built-in sample problems
+    """
 
     name = "humaneval"
     description = "Code generation (Python functions)"
 
     SAMPLE_TASKS = [
-        {
-            "prompt": "def add(a, b):\n    \"\"\"Add two numbers.\"\"\"\n",
-            "test": "assert add(2, 3) == 5\nassert add(-1, 1) == 0\n",
-            "canonical": "    return a + b",
-        },
-        {
-            "prompt": "def is_even(n):\n    \"\"\"Check if a number is even.\"\"\"\n",
-            "test": "assert is_even(4) == True\nassert is_even(3) == False\n",
-            "canonical": "    return n % 2 == 0",
-        },
-        {
-            "prompt": "def factorial(n):\n    \"\"\"Compute n factorial.\"\"\"\n",
-            "test": "assert factorial(5) == 120\nassert factorial(0) == 1\n",
-            "canonical": "    return 1 if n <= 1 else n * factorial(n - 1)",
-        },
+        {"prompt": "def add(a, b):\n    \"\"\"Add two numbers.\"\"\"\n",
+         "test": "assert add(2, 3) == 5\nassert add(-1, 1) == 0\n",
+         "canonical": "    return a + b"},
+        {"prompt": "def is_even(n):\n    \"\"\"Check if a number is even.\"\"\"\n",
+         "test": "assert is_even(4) == True\nassert is_even(3) == False\n",
+         "canonical": "    return n % 2 == 0"},
+        {"prompt": "def factorial(n):\n    \"\"\"Compute n factorial.\"\"\"\n",
+         "test": "assert factorial(5) == 120\nassert factorial(0) == 1\n",
+         "canonical": "    return 1 if n <= 1 else n * factorial(n - 1)"},
     ]
 
     def get_tasks(self):
+        ds = _try_load_hf_dataset("openai/openai_humaneval", "test")
+        if ds is not None:
+            tasks = []
+            for item in ds:
+                tasks.append({
+                    "prompt": item.get("prompt", ""),
+                    "test": item.get("test", ""),
+                    "canonical": item.get("canonical_solution", ""),
+                    "entry_point": item.get("entry_point", ""),
+                })
+            if self.max_tasks > 0:
+                tasks = tasks[:self.max_tasks]
+            return tasks
         return self.SAMPLE_TASKS
 
     def format_prompt(self, task, few_shot_examples=None):
@@ -448,7 +496,6 @@ class HumanEvalBenchmark(Benchmark):
         """Try to execute the generated code and run tests."""
         code = task["prompt"] + model_output.split("\n\n")[0] + "\n"
         test_code = code + task["test"]
-
         try:
             exec(test_code, {})
             return True
@@ -535,7 +582,7 @@ def evaluate_benchmark(model, benchmark, device="cpu", max_gen=64,
         per_task.append({
             "task_idx": i,
             "correct": is_correct,
-            "output": output_text[:200],  # Truncate for logging
+            "output": output_text[:200],
         })
 
         if verbose:
@@ -581,12 +628,14 @@ def evaluate_model(args):
 
     # Run evaluation
     all_results = {}
+    data_source = "HuggingFace" if not args.offline else "built-in samples"
     print(f"\n{'='*60}")
     print(f"  superGPT Evaluation")
     print(f"{'='*60}")
     print(f"  Model:      {n_params/1e6:.1f}M params")
     print(f"  Benchmarks: {', '.join(benchmark_names)}")
     print(f"  N-shot:     {args.n_shot}")
+    print(f"  Data:       {data_source}")
     print(f"{'='*60}\n")
 
     t0 = time.time()
@@ -595,7 +644,8 @@ def evaluate_model(args):
             print(f"  Warning: Unknown benchmark '{name}', skipping")
             continue
 
-        benchmark = BENCHMARKS[name](n_shot=args.n_shot)
+        benchmark = BENCHMARKS[name](n_shot=args.n_shot,
+                                      max_tasks=args.max_tasks)
         print(f"\n--- {benchmark.name}: {benchmark.description} ---")
 
         results = evaluate_benchmark(
@@ -659,6 +709,7 @@ Examples:
   python evaluate.py --checkpoint best.pt
   python evaluate.py --checkpoint best.pt --benchmarks mmlu gsm8k
   python evaluate.py --checkpoint best.pt --n-shot 5 --output results.json
+  python evaluate.py --checkpoint best.pt --max-tasks 100  # limit for speed
         """,
     )
 
@@ -673,10 +724,14 @@ Examples:
                         help="Max tokens to generate per task (default: 64)")
     parser.add_argument("--temperature", type=float, default=0.1,
                         help="Sampling temperature (default: 0.1)")
+    parser.add_argument("--max-tasks", type=int, default=0,
+                        help="Max tasks per benchmark, 0=all (default: 0)")
     parser.add_argument("--output", type=str, default=None,
                         help="Save results to JSON file")
     parser.add_argument("--verbose", action="store_true",
                         help="Show per-task results")
+    parser.add_argument("--offline", action="store_true",
+                        help="Use built-in samples only (no HF download)")
     parser.add_argument("--device", type=str, default="auto",
                         help="Device: auto, cuda, mps, cpu")
 

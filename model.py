@@ -83,16 +83,18 @@ class RotaryEmbedding(nn.Module):
 
         if scaling_type == "yarn":
             # YaRN: NTK-aware — modify base frequency
-            base = base * (
-                (scaling_factor * max_seq_len / max_seq_len) ** (dim / (dim - 2))
-            )
+            # scaling_factor = target_context / original_context
+            # NTK-aware base: base * scaling_factor^(dim / (dim - 2))
+            base = base * (scaling_factor ** (dim / (dim - 2)))
             inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
             # Apply wavelength-dependent scaling
             freqs = torch.arange(0, dim, 2).float() / dim
             # Low-frequency dims get linear interpolation,
             # high-frequency dims keep original
             wavelen = 2 * math.pi * base ** freqs
-            ratio = max_seq_len / wavelen
+            # Original context length = max_seq_len / scaling_factor
+            orig_max_seq_len = max_seq_len / scaling_factor
+            ratio = orig_max_seq_len / wavelen
             smooth = torch.clamp((ratio - 1) / (scaling_factor - 1), 0.0, 1.0)
             yarn_scale = (1 - smooth) / scaling_factor + smooth
             inv_freq = inv_freq * yarn_scale
