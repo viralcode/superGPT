@@ -252,7 +252,7 @@ def main():
         if args.rep_penalty != 1.0: sampling_info += f" | rep={args.rep_penalty}"
 
         print(f"\n{'='*60}")
-        print(f"  microGPT Interactive Generation")
+        print(f"  superGPT Interactive Generation")
         print(f"  Sampling: {sampling_info}")
         print(f"  KV-Cache: {'ON' if use_cache else 'OFF'}")
         if spec_generator:

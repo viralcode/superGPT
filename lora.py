@@ -1,5 +1,5 @@
 """
-LoRA — Low-Rank Adaptation for microGPT
+LoRA — Low-Rank Adaptation for superGPT
 ==========================================
 Implements LoRA (Low-Rank Adaptation) for parameter-efficient fine-tuning.
 

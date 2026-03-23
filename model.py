@@ -1,5 +1,5 @@
 """
-microGPT — Frontier LLM Architecture
+superGPT — Frontier LLM Architecture
 =======================================
 A decoder-only transformer implementing innovations from GPT-4, DeepSeek V3,
 Gemma 2, Mistral, LLaMA 3.1, and more:
@@ -755,7 +755,7 @@ class MTPModule(nn.Module):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class GPT(nn.Module):
-    """microGPT: Frontier-Architecture Language Model.
+    """superGPT: Frontier-Architecture Language Model.
 
     Features: GQA or MLA attention, sliding window, Flash Attention,
     MoE with shared experts, KV-cache, RoPE with YaRN, SwiGLU, RMSNorm,

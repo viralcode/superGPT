@@ -1,5 +1,5 @@
 """
-Knowledge Distillation for microGPT
+Knowledge Distillation for superGPT
 ======================================
 Train a smaller (student) model to mimic a larger (teacher) model.
 The student learns to match the teacher's output probability distribution
@@ -7,7 +7,7 @@ using KL divergence, producing a smaller model with much of the teacher's
 capability.
 
 Supports two teacher modes:
-  1. microGPT checkpoint (--teacher checkpoints/large.pt)
+  1. superGPT checkpoint (--teacher checkpoints/large.pt)
   2. HuggingFace model  (--hf-teacher Qwen/Qwen2.5-0.5B)
 
 This is the same technique used by:
@@ -25,7 +25,7 @@ Usage:
     # Distill from a HuggingFace model (Qwen, LLaMA, Mistral, etc.):
     python distill.py --hf-teacher Qwen/Qwen2.5-0.5B --student-preset small
 
-    # Distill from a larger microGPT model:
+    # Distill from a larger superGPT model:
     python distill.py --teacher checkpoints/large.pt --student-preset small
 
     # Custom settings:
@@ -60,11 +60,11 @@ from model import GPT
 #  Teacher model wrappers
 # ==============================================================================
 
-class MicroGPTTeacher:
-    """Teacher wrapper for a microGPT checkpoint."""
+class SuperGPTTeacher:
+    """Teacher wrapper for a superGPT checkpoint."""
 
     def __init__(self, checkpoint_path, device):
-        print(f"Loading microGPT teacher: {checkpoint_path}")
+        print(f"Loading superGPT teacher: {checkpoint_path}")
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
         self.config = GPTConfig(**ckpt["model_config"])
         self.model = GPT(self.config)
@@ -173,7 +173,7 @@ class HuggingFaceTeacher:
 # ==============================================================================
 
 def load_data_bin(data_dir, split, block_size, batch_size, device):
-    """Load data from pre-tokenized binary files (microGPT format)."""
+    """Load data from pre-tokenized binary files (superGPT format)."""
     data_path = os.path.join(data_dir, f"{split}.bin")
     meta_path = os.path.join(data_dir, "meta.pkl")
 
@@ -262,12 +262,22 @@ def distillation_loss(student_logits, teacher_logits, targets,
     Returns:
         loss, kd_loss_value, ce_loss_value
     """
+    # Ensure same sequence length (truncate to shorter)
+    t_s = student_logits.size(1)
+    t_t = teacher_logits.size(1)
+    if t_s != t_t:
+        t_min = min(t_s, t_t)
+        student_logits = student_logits[:, :t_min, :]
+        teacher_logits = teacher_logits[:, :t_min, :]
+        targets = targets[:, :t_min]
+
     # Handle vocab size mismatch (HF teacher may have different vocab)
     v_student = student_logits.size(-1)
     v_teacher = teacher_logits.size(-1)
 
     if v_student != v_teacher:
-        # Use the smaller vocab for KD loss
+        # Project to shared vocab space for KD loss
+        # Use the student's full vocab for KD (teacher logits truncated/padded)
         v_min = min(v_student, v_teacher)
         s_logits_kd = student_logits[..., :v_min]
         t_logits_kd = teacher_logits[..., :v_min]
@@ -275,22 +285,26 @@ def distillation_loss(student_logits, teacher_logits, targets,
         s_logits_kd = student_logits
         t_logits_kd = teacher_logits
 
+    B, T, V = s_logits_kd.shape
+
     # KL Divergence on soft targets
     student_soft = F.log_softmax(s_logits_kd / temperature, dim=-1)
     teacher_soft = F.softmax(t_logits_kd / temperature, dim=-1)
 
     kd_loss = F.kl_div(
-        student_soft.view(-1, student_soft.size(-1)),
-        teacher_soft.view(-1, teacher_soft.size(-1)),
+        student_soft.reshape(B * T, V),
+        teacher_soft.reshape(B * T, V),
         reduction="batchmean",
     )
     # Scale by T^2 (Hinton et al.)
     kd_loss = kd_loss * (temperature ** 2)
 
     # Standard cross-entropy on hard targets
+    # Clamp targets to student's vocab range
+    clamped_targets = targets.clamp(max=student_logits.size(-1) - 1)
     ce_loss = F.cross_entropy(
-        student_logits.view(-1, student_logits.size(-1)),
-        targets.view(-1),
+        student_logits.reshape(-1, student_logits.size(-1)),
+        clamped_targets.reshape(-1),
         ignore_index=-1,
     )
 
@@ -348,9 +362,9 @@ def distill(args):
     if is_hf:
         teacher = HuggingFaceTeacher(args.hf_teacher, device)
     elif args.teacher:
-        teacher = MicroGPTTeacher(args.teacher, device)
+        teacher = SuperGPTTeacher(args.teacher, device)
     else:
-        print("Error: Must provide --teacher (microGPT) or --hf-teacher (HuggingFace)")
+        print("Error: Must provide --teacher (superGPT) or --hf-teacher (HuggingFace)")
         sys.exit(1)
 
     # -- Create data loader function --
@@ -462,7 +476,7 @@ def distill(args):
                     "best_val_loss": best_val_loss,
                     "distillation": {
                         "teacher": teacher_name,
-                        "teacher_type": "huggingface" if is_hf else "microgpt",
+                        "teacher_type": "huggingface" if is_hf else "supergpt",
                         "temperature": args.temperature,
                         "alpha": args.alpha,
                         "compression": compression,
@@ -518,7 +532,7 @@ def distill(args):
         "best_val_loss": best_val_loss,
         "distillation": {
             "teacher": teacher_name,
-            "teacher_type": "huggingface" if is_hf else "microgpt",
+            "teacher_type": "huggingface" if is_hf else "supergpt",
             "temperature": args.temperature,
             "alpha": args.alpha,
             "compression": compression,
@@ -539,7 +553,7 @@ def distill(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Knowledge distillation for microGPT",
+        description="Knowledge distillation for superGPT",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -549,7 +563,7 @@ Examples:
   # Distill from LLaMA:
   python distill.py --hf-teacher meta-llama/Llama-3.2-1B --student-preset medium
 
-  # Distill from a microGPT checkpoint:
+  # Distill from a superGPT checkpoint:
   python distill.py --teacher checkpoints/large.pt --student-preset small --data data/
 
   # Custom temperature and alpha:
@@ -559,7 +573,7 @@ Examples:
 
     # Teacher (one of these two is required)
     parser.add_argument("--teacher", type=str, default=None,
-                        help="Path to microGPT teacher checkpoint")
+                        help="Path to superGPT teacher checkpoint")
     parser.add_argument("--hf-teacher", type=str, default=None,
                         help="HuggingFace model name (e.g. Qwen/Qwen2.5-0.5B, "
                              "meta-llama/Llama-3.2-1B)")
@@ -599,7 +613,7 @@ Examples:
     args = parser.parse_args()
 
     if not args.teacher and not args.hf_teacher:
-        print("Error: Must provide --teacher (microGPT) or --hf-teacher (HuggingFace)")
+        print("Error: Must provide --teacher (superGPT) or --hf-teacher (HuggingFace)")
         print("Examples:")
         print("  python distill.py --hf-teacher Qwen/Qwen2.5-0.5B --student-preset small")
         print("  python distill.py --teacher checkpoints/large.pt --student-preset small")

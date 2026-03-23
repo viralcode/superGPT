@@ -1,7 +1,7 @@
 """
 LoRA Fine-tuning Script
 ========================
-Fine-tune a pre-trained microGPT model using LoRA (Low-Rank Adaptation).
+Fine-tune a pre-trained superGPT model using LoRA (Low-Rank Adaptation).
 Only ~1-3% of parameters are trainable, making it practical on consumer GPUs.
 
 Usage:
@@ -203,7 +203,7 @@ def finetune(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="LoRA fine-tuning for microGPT")
+    parser = argparse.ArgumentParser(description="LoRA fine-tuning for superGPT")
     parser.add_argument("--checkpoint", type=str, default="checkpoints/best.pt",
                         help="Pre-trained model checkpoint")
     parser.add_argument("--data", type=str, default="data",

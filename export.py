@@ -1,7 +1,7 @@
 """
 Model Export — GGUF Format
 ============================
-Export a trained microGPT model to GGUF format for use with llama.cpp
+Export a trained superGPT model to GGUF format for use with llama.cpp
 and other inference engines.
 
 GGUF (GPT-Generated Unified Format) is the standard format for running
@@ -150,7 +150,7 @@ def write_gguf_metadata_kv(f, key, value_type, value):
 
 
 def export_gguf(checkpoint_path: str, output_path: str, quantize: str = "none"):
-    """Export a microGPT model to GGUF format.
+    """Export a superGPT model to GGUF format.
 
     Args:
         checkpoint_path: path to .pt checkpoint
@@ -221,22 +221,22 @@ def export_gguf(checkpoint_path: str, output_path: str, quantize: str = "none"):
 
     # Collect metadata
     metadata = {
-        "general.architecture": (GGUF_TYPE_STRING, "microgpt"),
-        "general.name": (GGUF_TYPE_STRING, f"microGPT {config.n_layer}L"),
+        "general.architecture": (GGUF_TYPE_STRING, "supergpt"),
+        "general.name": (GGUF_TYPE_STRING, f"superGPT {config.n_layer}L"),
         "general.file_type": (GGUF_TYPE_UINT32,
                               {GGML_TYPE_F16: 1, GGML_TYPE_Q8_0: 7,
                                GGML_TYPE_Q4_0: 2}.get(tensor_type, 0)),
-        "microgpt.context_length": (GGUF_TYPE_UINT32, config.block_size),
-        "microgpt.embedding_length": (GGUF_TYPE_UINT32, config.n_embd),
-        "microgpt.block_count": (GGUF_TYPE_UINT32, config.n_layer),
-        "microgpt.head_count": (GGUF_TYPE_UINT32, config.n_head),
-        "microgpt.head_count_kv": (GGUF_TYPE_UINT32, config.n_kv_head),
-        "microgpt.vocab_size": (GGUF_TYPE_UINT32, config.vocab_size),
-        "microgpt.use_moe": (GGUF_TYPE_BOOL, config.use_moe),
-        "microgpt.use_mla": (GGUF_TYPE_BOOL, config.use_mla),
-        "microgpt.use_swiglu": (GGUF_TYPE_BOOL, config.use_swiglu),
-        "microgpt.use_rope": (GGUF_TYPE_BOOL, config.use_rope),
-        "microgpt.sliding_window": (GGUF_TYPE_UINT32, config.sliding_window),
+        "supergpt.context_length": (GGUF_TYPE_UINT32, config.block_size),
+        "supergpt.embedding_length": (GGUF_TYPE_UINT32, config.n_embd),
+        "supergpt.block_count": (GGUF_TYPE_UINT32, config.n_layer),
+        "supergpt.head_count": (GGUF_TYPE_UINT32, config.n_head),
+        "supergpt.head_count_kv": (GGUF_TYPE_UINT32, config.n_kv_head),
+        "supergpt.vocab_size": (GGUF_TYPE_UINT32, config.vocab_size),
+        "supergpt.use_moe": (GGUF_TYPE_BOOL, config.use_moe),
+        "supergpt.use_mla": (GGUF_TYPE_BOOL, config.use_mla),
+        "supergpt.use_swiglu": (GGUF_TYPE_BOOL, config.use_swiglu),
+        "supergpt.use_rope": (GGUF_TYPE_BOOL, config.use_rope),
+        "supergpt.sliding_window": (GGUF_TYPE_UINT32, config.sliding_window),
     }
 
     with open(output_path, 'wb') as f:
@@ -286,7 +286,7 @@ def export_gguf(checkpoint_path: str, output_path: str, quantize: str = "none"):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Export microGPT model to GGUF format")
+    parser = argparse.ArgumentParser(description="Export superGPT model to GGUF format")
     parser.add_argument("--checkpoint", type=str, default="checkpoints/best.pt",
                         help="Path to model checkpoint")
     parser.add_argument("--output", type=str, default="model.gguf",

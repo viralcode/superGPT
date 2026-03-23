@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">microGPT</h1>
+  <h1 align="center">superGPT</h1>
   <p align="center"><strong>Train your own LLM from scratch — with every frontier innovation</strong></p>
   <p align="center">
     <em>GPT-4 • DeepSeek V3 • Gemma 2 • Mistral • LLaMA 3 — Zero abstraction. Pure PyTorch.</em>
@@ -18,7 +18,7 @@
 
 ---
 
-microGPT is a **from-scratch LLM training framework** implementing every major innovation from GPT-4 through DeepSeek V3, Gemma 2, and Mistral — in readable PyTorch. Train on any text, scale from laptop to GPU cluster, fine-tune with LoRA, align with DPO, export to GGUF.
+superGPT is a **from-scratch LLM training framework** implementing every major innovation from GPT-4 through DeepSeek V3, Gemma 2, and Mistral — in readable PyTorch. Train on any text, scale from laptop to GPU cluster, fine-tune with LoRA, align with DPO, export to GGUF.
 
 ## Architecture
 
@@ -51,8 +51,8 @@ microGPT is a **from-scratch LLM training framework** implementing every major i
 
 ```bash
 # Clone and setup
-git clone https://github.com/viralcode/microGPT.git
-cd microGPT
+git clone https://github.com/viralcode/superGPT.git
+cd superGPT
 pip install torch numpy
 
 # Prepare data (included Shakespeare dataset, or use your own)
@@ -257,7 +257,7 @@ config = GPTConfig(
 
 ## Knowledge Distillation
 
-Transfer knowledge from a large teacher model to a smaller student model. Supports both HuggingFace models (Qwen, LLaMA, Mistral) and microGPT checkpoints.
+Transfer knowledge from a large teacher model to a smaller student model. Supports both HuggingFace models (Qwen, LLaMA, Mistral) and superGPT checkpoints.
 
 ```bash
 # Distill from Qwen (requires: pip install transformers)
@@ -266,7 +266,7 @@ python distill.py --hf-teacher Qwen/Qwen2.5-0.5B --student-preset small --data d
 # Distill from LLaMA
 python distill.py --hf-teacher meta-llama/Llama-3.2-1B --student-preset medium
 
-# Distill from a larger microGPT model
+# Distill from a larger superGPT model
 python distill.py --teacher checkpoints/large.pt --student-preset small --data data/
 
 # Custom temperature and balance
@@ -288,7 +288,7 @@ python generate.py --checkpoint checkpoints/distilled_best.pt --interactive
 ## Project Structure
 
 ```
-microGPT/
+superGPT/
 ├── model.py            # MLA, GQA, sliding window, Flash Attn, MoE, MTP, KV-cache,
 │                       # RoPE+YaRN, SwiGLU, speculative decoding, grad checkpointing
 ├── config.py           # All hyperparameters + presets (small → gemma2)
