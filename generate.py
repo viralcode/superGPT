@@ -59,9 +59,13 @@ def load_model(checkpoint_path: str, device: str):
 
     # Check if aligned
     alignment = checkpoint.get("alignment", None)
+    distillation = checkpoint.get("distillation", None)
     if alignment:
         print(f"Loaded aligned model ({alignment['method'].upper()}, "
               f"\u03b2={alignment['beta']}) from iteration {iter_num}")
+    elif distillation:
+        teacher = distillation.get('teacher', 'unknown')
+        print(f"Loaded distilled model (teacher: {teacher}) from iteration {iter_num} (val loss: {val_loss})")
     else:
         print(f"Loaded model from iteration {iter_num} (val loss: {val_loss})")
 
@@ -86,11 +90,43 @@ def load_model(checkpoint_path: str, device: str):
     if features:
         print(f"Architecture: {' | '.join(features)}")
 
-    return model, config
+    return model, config, checkpoint
 
 
-def load_tokenizer(data_dir: str):
-    """Load the tokenizer used during training."""
+def load_tokenizer(data_dir: str, checkpoint=None):
+    """Load the tokenizer used during training.
+
+    For distilled models from HuggingFace teachers, automatically loads
+    the teacher's tokenizer instead of looking at meta.pkl.
+    """
+    # Check if this is a distilled model with a HF teacher
+    if checkpoint:
+        distillation = checkpoint.get("distillation", {})
+        if distillation.get("teacher_type") == "huggingface":
+            teacher_name = distillation.get("teacher", "")
+            if teacher_name:
+                try:
+                    from transformers import AutoTokenizer
+                    hf_tok = AutoTokenizer.from_pretrained(
+                        teacher_name, trust_remote_code=True
+                    )
+                    # Wrap HF tokenizer to have encode/decode interface
+                    class HFTokenizerWrapper:
+                        def __init__(self, hf_tok):
+                            self.hf_tok = hf_tok
+                            self.vocab_size = hf_tok.vocab_size
+                        def encode(self, text):
+                            return self.hf_tok.encode(text)
+                        def decode(self, tokens):
+                            return self.hf_tok.decode(tokens, skip_special_tokens=True)
+                    tokenizer = HFTokenizerWrapper(hf_tok)
+                    print(f"Loaded HuggingFace tokenizer from teacher: {teacher_name} "
+                          f"(vocab_size={tokenizer.vocab_size})")
+                    return tokenizer
+                except Exception as e:
+                    print(f"Warning: Could not load HF tokenizer '{teacher_name}': {e}")
+                    print("Falling back to meta.pkl tokenizer.")
+
     meta_path = os.path.join(data_dir, "meta.pkl")
     if not os.path.exists(meta_path):
         print(f"Error: Tokenizer metadata not found at {meta_path}")
@@ -226,8 +262,8 @@ def main():
         print("Train a model first with: python train.py")
         sys.exit(1)
 
-    model, config = load_model(args.checkpoint, device)
-    tokenizer = load_tokenizer(args.data_dir)
+    model, config, checkpoint = load_model(args.checkpoint, device)
+    tokenizer = load_tokenizer(args.data_dir, checkpoint=checkpoint)
 
     top_k = args.top_k if args.top_k > 0 else None
     use_cache = not args.no_cache
