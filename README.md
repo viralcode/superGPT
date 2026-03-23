@@ -257,18 +257,33 @@ config = GPTConfig(
 
 ## Knowledge Distillation
 
-Transfer knowledge from a large teacher model to a smaller student model (same technique used by DeepSeek R1 Distill, Qwen):
+Transfer knowledge from a large teacher model to a smaller student model. Supports both HuggingFace models (Qwen, LLaMA, Mistral) and microGPT checkpoints.
 
 ```bash
-# Distill a large model into a small one
+# Distill from Qwen (requires: pip install transformers)
+python distill.py --hf-teacher Qwen/Qwen2.5-0.5B --student-preset small --data data/
+
+# Distill from LLaMA
+python distill.py --hf-teacher meta-llama/Llama-3.2-1B --student-preset medium
+
+# Distill from a larger microGPT model
 python distill.py --teacher checkpoints/large.pt --student-preset small --data data/
 
-# Custom temperature and balance (alpha=0.7 means 70% KD, 30% CE)
-python distill.py --teacher large.pt --student-preset small --temperature 3.0 --alpha 0.7
+# Custom temperature and balance
+python distill.py --hf-teacher Qwen/Qwen2.5-0.5B --temperature 3.0 --alpha 0.7
 
 # Generate with the distilled model
 python generate.py --checkpoint checkpoints/distilled_best.pt --interactive
 ```
+
+**Recommended HuggingFace teachers:**
+
+| Model | Size | Best For |
+|-------|------|----------|
+| `Qwen/Qwen2.5-0.5B` | 500M | Quick experiments, CPU-friendly |
+| `Qwen/Qwen2.5-1.5B` | 1.5B | Good quality, single GPU |
+| `meta-llama/Llama-3.2-1B` | 1B | Strong baseline |
+| `mistralai/Mistral-7B-v0.3` | 7B | High quality, needs GPU |
 
 ## Project Structure
 
