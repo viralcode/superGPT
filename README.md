@@ -96,6 +96,49 @@ That had not fly thee to shake the noble duke.
 
 > **10.6M params • val loss 1.479 • 49 tokens/sec on CPU • trained in ~45 min**
 
+### Shakespeare Training Results
+
+The included Shakespeare dataset (`data/input.txt`, ~1MB) was trained with the `small` preset on a MacBook (CPU only):
+
+| Metric | Value |
+|--------|-------|
+| **Model** | `small` preset — 6 layers, 6 heads, 384 dim |
+| **Parameters** | 10.6M |
+| **Training data** | Tiny Shakespeare (1.1MB, ~300K tokens) |
+| **Tokenizer** | Character-level (vocab_size=65) |
+| **Batch size** | 32 |
+| **Max iterations** | 5,000 |
+| **Best val loss** | **1.479** (at iteration 1,500) |
+| **Training time** | ~45 min on CPU (Apple M-series) |
+| **Inference speed** | 49 tokens/sec with KV-cache |
+
+The model learns Shakespeare's writing style, character names (ROMEO, JULIET, LADY CAPULET), dialogue structure, and poetic phrasing — all from just ~1MB of text.
+
+### Training Options
+
+```bash
+# Basic training
+python train.py --preset small --max-iters 5000
+
+# Memory-efficient (saves ~60% VRAM)
+python train.py --preset large --gradient-checkpointing
+
+# DeepSeek V3's learning rate schedule
+python train.py --preset medium --lr-schedule wsd
+
+# Custom learning rate and batch size
+python train.py --preset medium --lr 1e-4 --batch-size 128
+
+# Resume from checkpoint
+python train.py --preset small --resume checkpoints/latest.pt
+
+# Multi-GPU with FSDP
+torchrun --nproc_per_node=4 train.py --preset xl --distributed
+
+# Compile for maximum speed (PyTorch 2.0+)
+python train.py --preset medium --compile
+```
+
 ### Train on Your Own Data
 
 ```bash
