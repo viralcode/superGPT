@@ -526,7 +526,600 @@ def process_math(text):
 
 ---
 
-## 7. Phase 6: Tokenization
+## 8. Phase 7: Custom Data — GitHub, Google, PDFs, APIs
+
+Most practitioners don't start from Common Crawl. Here's how to build a custom dataset from real-world sources.
+
+### 8.1 Crawling GitHub Repositories
+
+```python
+"""
+Crawl GitHub repos for code training data.
+Uses the GitHub API + git clone for full content.
+"""
+import os
+import subprocess
+import requests
+import json
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Set your PAT
+HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
+
+def search_github_repos(language: str, min_stars: int = 100, max_repos: int = 500):
+    """Find popular repos by language."""
+    repos = []
+    page = 1
+    while len(repos) < max_repos:
+        url = (f"https://api.github.com/search/repositories"
+               f"?q=language:{language}+stars:>{min_stars}"
+               f"&sort=stars&per_page=100&page={page}")
+        resp = requests.get(url, headers=HEADERS)
+        data = resp.json()
+        if 'items' not in data:
+            break
+        for item in data['items']:
+            # Only permissively-licensed repos
+            license_key = (item.get('license') or {}).get('key', '')
+            if license_key in ['mit', 'apache-2.0', 'bsd-2-clause', 'bsd-3-clause']:
+                repos.append({
+                    'name': item['full_name'],
+                    'url': item['clone_url'],
+                    'stars': item['stargazers_count'],
+                    'license': license_key,
+                    'language': language,
+                })
+        page += 1
+        if page > 5:
+            break
+    return repos[:max_repos]
+
+def clone_and_extract(repo_url, output_dir, extensions=None):
+    """Clone a repo and extract source files."""
+    repo_name = repo_url.split('/')[-1].replace('.git', '')
+    clone_dir = f"/tmp/repos/{repo_name}"
+    
+    # Shallow clone (saves bandwidth)
+    subprocess.run(['git', 'clone', '--depth', '1', repo_url, clone_dir],
+                   capture_output=True, timeout=60)
+    
+    if extensions is None:
+        extensions = {'.py', '.js', '.ts', '.java', '.cpp', '.c', '.go', '.rs',
+                      '.rb', '.php', '.swift', '.kt', '.scala', '.sh', '.sql'}
+    
+    documents = []
+    for root, _, files in os.walk(clone_dir):
+        # Skip hidden dirs, tests, vendor, node_modules
+        if any(skip in root for skip in ['/.', '/test', '/vendor', '/node_modules',
+                                          '/__pycache__', '/dist', '/build']):
+            continue
+        for fname in files:
+            ext = os.path.splitext(fname)[1]
+            if ext in extensions:
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath, 'r', errors='ignore') as f:
+                        content = f.read()
+                    if 100 < len(content) < 100_000:  # Skip tiny/huge files
+                        documents.append({
+                            'text': content,
+                            'source': f"github:{repo_url}:{fname}",
+                            'language': ext[1:],
+                        })
+                except:
+                    pass
+    
+    # Cleanup
+    subprocess.run(['rm', '-rf', clone_dir], capture_output=True)
+    return documents
+
+# Example: Crawl top Python repos
+repos = search_github_repos('python', min_stars=500, max_repos=200)
+all_code = []
+for repo in repos:
+    docs = clone_and_extract(repo['url'], 'data/code/')
+    all_code.extend(docs)
+    print(f"  {repo['name']}: {len(docs)} files")
+
+print(f"Total: {len(all_code)} code files from {len(repos)} repos")
+```
+
+### 8.2 Crawling Google Search Results
+
+```python
+"""
+Crawl content from Google search results on specific topics.
+Useful for building domain-specific datasets (medical, legal, etc.)
+"""
+import requests
+from bs4 import BeautifulSoup
+import trafilatura
+import time
+
+def google_search(query: str, num_results: int = 50) -> list[str]:
+    """Get URLs from Google search (use SerpAPI for production)."""
+    # Option 1: Use SerpAPI (recommended, has free tier)
+    # pip install google-search-results
+    from serpapi import GoogleSearch
+    
+    urls = []
+    for start in range(0, num_results, 10):
+        params = {
+            "q": query,
+            "start": start,
+            "num": 10,
+            "api_key": os.getenv("SERPAPI_KEY"),
+        }
+        search = GoogleSearch(params)
+        results = search.get_dict()
+        
+        for result in results.get("organic_results", []):
+            urls.append(result["link"])
+        time.sleep(1)  # Rate limit
+    
+    return urls[:num_results]
+
+def crawl_search_results(queries: list[str]) -> list[dict]:
+    """Crawl and extract text from Google search results."""
+    documents = []
+    
+    for query in queries:
+        urls = google_search(query, num_results=30)
+        
+        for url in urls:
+            try:
+                downloaded = trafilatura.fetch_url(url)
+                if downloaded:
+                    text = trafilatura.extract(downloaded, favor_precision=True)
+                    if text and len(text) > 200:
+                        documents.append({
+                            'text': text,
+                            'source': url,
+                            'query': query,
+                        })
+            except Exception as e:
+                continue
+            time.sleep(0.5)  # Be polite
+    
+    return documents
+
+# Example: Build a machine learning textbook corpus
+ml_queries = [
+    "transformer architecture explained tutorial",
+    "backpropagation gradient descent mathematics",
+    "attention mechanism self-attention multi-head",
+    "convolutional neural networks image recognition",
+    "reinforcement learning policy gradient methods",
+    "natural language processing tokenization embeddings",
+    "generative adversarial networks training stability",
+    "diffusion models denoising score matching",
+]
+
+ml_docs = crawl_search_results(ml_queries)
+print(f"Collected {len(ml_docs)} documents on ML topics")
+```
+
+### 8.3 Extracting Text from PDFs (Books, Papers, Manuals)
+
+```python
+"""
+Extract training data from PDF files.
+Great for textbooks, research papers, technical manuals.
+"""
+
+def extract_pdf_text(pdf_path: str) -> str:
+    """Extract clean text from a PDF file."""
+    # Option 1: PyMuPDF (fastest, best quality)
+    import fitz  # pip install PyMuPDF
+    
+    doc = fitz.open(pdf_path)
+    text_parts = []
+    
+    for page in doc:
+        text = page.get_text("text")
+        if text.strip():
+            text_parts.append(text)
+    
+    full_text = '\n'.join(text_parts)
+    
+    # Clean up PDF artifacts
+    import re
+    full_text = re.sub(r'-\n(\w)', r'\1', full_text)     # Fix hyphenation
+    full_text = re.sub(r'(\w)\n(\w)', r'\1 \2', full_text)  # Fix line breaks mid-sentence
+    full_text = re.sub(r'\n{3,}', '\n\n', full_text)
+    
+    return full_text
+
+def process_pdf_directory(pdf_dir: str) -> list[dict]:
+    """Process all PDFs in a directory."""
+    import glob
+    documents = []
+    
+    for pdf_path in glob.glob(os.path.join(pdf_dir, '**/*.pdf'), recursive=True):
+        try:
+            text = extract_pdf_text(pdf_path)
+            if len(text) > 500:  # Skip very short PDFs
+                documents.append({
+                    'text': text,
+                    'source': pdf_path,
+                    'type': 'pdf',
+                })
+        except Exception as e:
+            print(f"Error processing {pdf_path}: {e}")
+    
+    return documents
+
+# Example: Process a directory of ML textbooks
+docs = process_pdf_directory('/data/textbooks/')
+print(f"Extracted text from {len(docs)} PDFs")
+```
+
+### 8.4 Wikipedia (Full Dump)
+
+```python
+"""
+Process a Wikipedia dump — one of the cleanest, most structured data sources.
+Every major LLM uses Wikipedia.
+"""
+from datasets import load_dataset
+
+# HuggingFace hosts pre-processed Wikipedia
+wiki = load_dataset("wikipedia", "20220301.en", split="train", streaming=True)
+
+documents = []
+for i, article in enumerate(wiki):
+    text = article['text']
+    if len(text) > 500:  # Skip stubs
+        documents.append({
+            'text': text,
+            'title': article['title'],
+            'source': 'wikipedia',
+        })
+    if i >= 100_000:  # Limit for example
+        break
+
+print(f"Loaded {len(documents)} Wikipedia articles")
+```
+
+### 8.5 StackOverflow & StackExchange
+
+```python
+"""
+StackOverflow Q&A — excellent for teaching models to answer technical questions.
+Available as public data dumps.
+"""
+from datasets import load_dataset
+
+# Load StackOverflow questions/answers
+so = load_dataset("koutch/stackoverflow_python", split="train", streaming=True)
+
+def format_qa_pair(example):
+    """Format as question → answer for training."""
+    return {
+        'text': (
+            f"Question: {example['question_body']}\n\n"
+            f"Answer: {example['answer_body']}\n\n"
+            f"Score: {example['answer_score']}"
+        ),
+        'source': 'stackoverflow',
+    }
+
+# Alternative: Download the full XML dump from archive.org
+# https://archive.org/details/stackexchange
+```
+
+### 8.6 API-Based Data Collection
+
+```python
+"""
+Collect data from APIs — news, research, documentation.
+"""
+import requests
+
+# Example: arXiv API for recent papers
+def fetch_arxiv_papers(query: str, max_results: int = 100):
+    """Fetch papers from arXiv API."""
+    import xml.etree.ElementTree as ET
+    
+    url = f"http://export.arxiv.org/api/query?search_query=all:{query}&max_results={max_results}"
+    resp = requests.get(url)
+    root = ET.fromstring(resp.text)
+    
+    ns = {'atom': 'http://www.w3.org/2005/Atom'}
+    papers = []
+    for entry in root.findall('atom:entry', ns):
+        title = entry.find('atom:title', ns).text.strip()
+        abstract = entry.find('atom:summary', ns).text.strip()
+        papers.append({
+            'text': f"Title: {title}\n\nAbstract: {abstract}",
+            'source': 'arxiv',
+        })
+    return papers
+
+# Example: News API
+def fetch_news(query: str, api_key: str):
+    """Fetch news articles from NewsAPI."""
+    url = f"https://newsapi.org/v2/everything?q={query}&apiKey={api_key}&pageSize=100"
+    resp = requests.get(url)
+    articles = []
+    for item in resp.json().get('articles', []):
+        if item.get('content'):
+            articles.append({
+                'text': f"{item['title']}\n\n{item['content']}",
+                'source': item['url'],
+            })
+    return articles
+```
+
+### 8.7 Combining All Custom Sources
+
+```python
+"""
+Merge data from all custom sources into a unified JSONL corpus.
+"""
+import json
+
+def merge_sources(source_lists: dict[str, list], output_path: str):
+    """Merge multiple data sources into a single JSONL file."""
+    total = 0
+    
+    with open(output_path, 'w') as f:
+        for source_name, documents in source_lists.items():
+            for doc in documents:
+                doc['source_type'] = source_name
+                f.write(json.dumps(doc, ensure_ascii=False) + '\n')
+                total += 1
+    
+    print(f"Merged {total} documents from {len(source_lists)} sources")
+    print(f"Saved to: {output_path}")
+
+# Example usage:
+merge_sources({
+    'github_code': all_code,           # From 8.1
+    'web_articles': ml_docs,           # From 8.2
+    'pdf_textbooks': pdf_docs,         # From 8.3
+    'wikipedia': wiki_docs,            # From 8.4
+    'stackoverflow': so_docs,          # From 8.5
+    'arxiv_papers': arxiv_docs,        # From 8.6
+}, output_path='data/custom_corpus.jsonl')
+```
+
+---
+
+## 9. Phase 8: Synthetic Data Generation
+
+Synthetic data is now **essential** for modern LLMs. DeepSeek-V3 used synthetic data from DeepSeek-R1 for reasoning. GPT-4 was trained partly on GPT-4-generated data.
+
+### 9.1 Self-Instruct: Generate Instructions from Seed Tasks
+
+```python
+"""
+Self-Instruct: start with ~100 seed tasks, use an LLM to generate thousands more.
+Original method from Stanford (2023). Cost-effective for SFT data.
+"""
+from openai import OpenAI
+import json, random
+
+client = OpenAI()
+
+SEED_TASKS = [
+    {"instruction": "Write a Python function to sort a list of dictionaries by a key.",
+     "output": "def sort_dicts(lst, key):\n    return sorted(lst, key=lambda x: x[key])"},
+    {"instruction": "Explain what a neural network is in simple terms.",
+     "output": "A neural network is a computer system inspired by the human brain..."},
+    {"instruction": "Solve: What is 15% of 240?",
+     "output": "15% of 240 = 0.15 × 240 = 36"},
+    # Add 100+ diverse seed tasks
+]
+
+def generate_instructions(seed_tasks: list, n_generate: int = 5000):
+    """Generate new instructions using self-instruct."""
+    all_tasks = list(seed_tasks)
+    
+    for i in range(n_generate):
+        # Sample 3 random examples as context
+        examples = random.sample(seed_tasks, min(3, len(seed_tasks)))
+        examples_text = "\n".join(
+            f"Instruction: {t['instruction']}\nOutput: {t['output']}"
+            for t in examples
+        )
+        
+        prompt = f"""Here are some example tasks:
+
+{examples_text}
+
+Generate a new, different instruction and its output. 
+Be creative and diverse. Cover coding, math, writing, analysis, and reasoning.
+
+New Instruction:"""
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # Cheap and fast
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=500,
+            temperature=0.9,
+        )
+        
+        text = response.choices[0].message.content
+        # Parse instruction and output from response
+        if "Output:" in text:
+            parts = text.split("Output:", 1)
+            all_tasks.append({
+                "instruction": parts[0].strip(),
+                "output": parts[1].strip(),
+            })
+        
+        if (i + 1) % 100 == 0:
+            print(f"  Generated {i+1}/{n_generate} instructions")
+    
+    return all_tasks
+```
+
+### 9.2 Evol-Instruct: Evolve Simple Instructions into Complex Ones
+
+```python
+"""
+Evol-Instruct (WizardLM): Take simple instructions and evolve them
+through multiple rounds to increase complexity and diversity.
+
+Evolution operators:
+1. Add constraints ("...do this without using loops")
+2. Deepen ("explain the underlying mathematics")  
+3. Concretize ("give a specific example with real data")
+4. Increase reasoning ("solve step-by-step showing all work")
+5. Broaden ("extend to handle edge cases")
+"""
+
+EVOLUTION_PROMPTS = {
+    "add_constraints": """Rewrite this instruction to add 2-3 specific constraints 
+that make it more challenging:
+Original: {instruction}
+Evolved:""",
+
+    "deepen": """Rewrite this instruction to require deeper knowledge and understanding:
+Original: {instruction}
+Evolved:""",
+
+    "concretize": """Rewrite this instruction to be more specific with concrete 
+examples, real data, or specific scenarios:
+Original: {instruction}
+Evolved:""",
+
+    "increase_reasoning": """Rewrite this instruction to require multi-step 
+reasoning, showing all intermediate steps:
+Original: {instruction}
+Evolved:""",
+}
+
+def evolve_instruction(instruction: str, n_rounds: int = 3) -> list[str]:
+    """Evolve a simple instruction through multiple complexity rounds."""
+    evolved = [instruction]
+    
+    for round_num in range(n_rounds):
+        operator = random.choice(list(EVOLUTION_PROMPTS.keys()))
+        prompt = EVOLUTION_PROMPTS[operator].format(instruction=evolved[-1])
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.8,
+        )
+        
+        new_instruction = response.choices[0].message.content.strip()
+        evolved.append(new_instruction)
+    
+    return evolved
+```
+
+### 9.3 Magpie: Fully Automated Data Synthesis
+
+```python
+"""
+Magpie (2024): Generate instruction data WITHOUT any seed tasks.
+Just prompt an instruction-tuned model with the chat template prefix.
+The model naturally generates a user query, then you generate a response.
+
+This is the cheapest, most scalable synthetic data method.
+"""
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch
+
+def magpie_generate(model_name="meta-llama/Meta-Llama-3-8B-Instruct", n=1000):
+    """Generate instruction-response pairs using Magpie method."""
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch.bfloat16, device_map="auto"
+    )
+    
+    # The "trick": just give the model the chat template prefix
+    # and it will generate a realistic user query
+    system_prefix = "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+    
+    pairs = []
+    for i in range(n):
+        # Step 1: Generate a user instruction
+        inputs = tokenizer(system_prefix, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            output = model.generate(**inputs, max_new_tokens=200, temperature=0.9,
+                                     do_sample=True, top_p=0.95)
+        instruction = tokenizer.decode(output[0], skip_special_tokens=True)
+        
+        # Step 2: Generate the assistant response
+        full_prompt = f"""<|begin_of_text|><|start_header_id|>user<|end_header_id|>
+
+{instruction}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+"""
+        inputs = tokenizer(full_prompt, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            output = model.generate(**inputs, max_new_tokens=1000, temperature=0.7)
+        response = tokenizer.decode(output[0], skip_special_tokens=True)
+        
+        pairs.append({"instruction": instruction, "response": response})
+        
+        if (i + 1) % 100 == 0:
+            print(f"  Magpie: {i+1}/{n} pairs generated")
+    
+    return pairs
+```
+
+### 9.4 Chain-of-Thought Distillation
+
+```python
+"""
+Generate CoT (Chain-of-Thought) reasoning data from a strong model.
+This is how DeepSeek-V3 got reasoning from DeepSeek-R1.
+"""
+
+def generate_cot_data(problems: list[str], model="gpt-4o"):
+    """Generate step-by-step solutions using a strong model."""
+    cot_data = []
+    
+    for problem in problems:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{
+                "role": "system",
+                "content": "Solve the following problem step by step. "
+                           "Show ALL intermediate reasoning. "
+                           "Use <think>...</think> tags for reasoning, "
+                           "then give the final answer."
+            }, {
+                "role": "user",
+                "content": problem
+            }],
+            temperature=0.3,
+        )
+        
+        solution = response.choices[0].message.content
+        cot_data.append({
+            "problem": problem,
+            "solution": solution,
+            "type": "chain_of_thought",
+        })
+    
+    return cot_data
+
+# Combine with rejection sampling: generate N solutions, keep only correct ones
+def rejection_sample(problem, correct_answer, model="gpt-4o-mini", n=8):
+    """Generate N solutions, keep only ones that reach the correct answer."""
+    correct_solutions = []
+    
+    for _ in range(n):
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": f"Solve: {problem}"}],
+            temperature=0.9,  # High temp for diversity
+        )
+        solution = response.choices[0].message.content
+        if str(correct_answer) in solution:
+            correct_solutions.append(solution)
+    
+    return correct_solutions  # Multiple diverse correct solutions
+```
+
+---
+
+## 10. Phase 9: Tokenization
 
 ### Choosing a Tokenizer
 
@@ -594,7 +1187,7 @@ print(f"Saved {len(arr):,} tokens ({arr.nbytes / 1e9:.1f} GB)")
 
 ---
 
-## 8. Phase 7: Data Mixing & Packaging
+## 11. Phase 10: Data Mixing & Packaging
 
 ### The Art of Data Mixing
 
@@ -714,7 +1307,123 @@ class ShardedDataLoader:
 
 ---
 
-## 9. Phase 8: Training at Scale
+## 12. Phase 11: Curriculum Learning & Data Scheduling
+
+### Why Data Order Matters
+
+Training on data in a strategic order — easy → hard — can improve convergence by 10-20%. This is called **curriculum learning**.
+
+### Scoring Document Difficulty
+
+```python
+"""
+Score documents by difficulty using multiple metrics.
+Train on easy data first, complex data later.
+"""
+import re
+import math
+
+def score_difficulty(text: str) -> float:
+    """Score text difficulty 0-1 (0 = easy, 1 = hard)."""
+    words = text.split()
+    n_words = len(words)
+    
+    if n_words == 0:
+        return 0.5
+    
+    # 1. Average word length (longer words = harder)
+    avg_word_len = sum(len(w) for w in words) / n_words
+    word_score = min(avg_word_len / 10, 1.0)
+    
+    # 2. Sentence length (longer sentences = harder)
+    sentences = re.split(r'[.!?]+', text)
+    avg_sent_len = n_words / max(len(sentences), 1)
+    sent_score = min(avg_sent_len / 40, 1.0)
+    
+    # 3. Vocabulary richness (more unique words = harder)
+    vocab_ratio = len(set(w.lower() for w in words)) / n_words
+    vocab_score = vocab_ratio
+    
+    # 4. Technical content (LaTeX, code, formulas = harder)
+    tech_markers = sum(1 for m in ['$', '\\frac', 'def ', 'class ', 'import ',
+                                     'theorem', 'proof', 'algorithm']
+                       if m in text)
+    tech_score = min(tech_markers / 5, 1.0)
+    
+    # 5. Document length (longer = harder to learn from)
+    len_score = min(math.log(n_words + 1) / math.log(10000), 1.0)
+    
+    # Weighted combination
+    return (0.2 * word_score + 0.2 * sent_score + 0.2 * vocab_score +
+            0.25 * tech_score + 0.15 * len_score)
+```
+
+### Staged Training Implementation
+
+```python
+"""
+Implement curriculum learning with staged data scheduling.
+"""
+import numpy as np
+
+def create_curriculum_shards(documents, n_stages=4, output_dir='data/curriculum/'):
+    """Sort documents by difficulty and create staged shards."""
+    import os
+    
+    # Score all documents
+    scored = [(score_difficulty(doc['text']), doc) for doc in documents]
+    scored.sort(key=lambda x: x[0])  # Easy first
+    
+    # Split into stages
+    stage_size = len(scored) // n_stages
+    
+    for stage in range(n_stages):
+        start = stage * stage_size
+        end = start + stage_size if stage < n_stages - 1 else len(scored)
+        
+        stage_docs = [doc for _, doc in scored[start:end]]
+        
+        stage_dir = os.path.join(output_dir, f'stage_{stage}')
+        os.makedirs(stage_dir, exist_ok=True)
+        
+        # Tokenize and save this stage
+        # ... (use your tokenization pipeline)
+        
+        avg_diff = np.mean([s for s, _ in scored[start:end]])
+        print(f"Stage {stage}: {len(stage_docs)} docs, avg difficulty: {avg_diff:.3f}")
+
+# Training schedule:
+# Stage 0 (iter 0-2500):     Easy web text, simple sentences
+# Stage 1 (iter 2500-5000):  Medium articles, basic code
+# Stage 2 (iter 5000-7500):  Hard academic papers, complex code
+# Stage 3 (iter 7500-10000): Hardest math proofs, research papers
+```
+
+### Annealing: The Final Push
+
+```python
+"""
+In the last 20% of training, switch to a curated high-quality mix.
+This is what Llama 3 calls the 'annealing' phase.
+
+Key changes during annealing:
+1. Upsample highest-quality data (FineWeb-Edu score >= 4)
+2. Upsample code and math (helps reasoning)  
+3. Reduce learning rate to near-zero
+4. May increase context length (e.g., 4K → 128K)
+"""
+
+# Llama 3 annealing schedule:
+# - Last 40M tokens on highest quality mix
+# - Linear LR decay from 3.5e-5 → 0
+# - Code weight: 17% → 25%
+# - Math weight: 25% → 35%
+# - Result: +2-3% on reasoning benchmarks vs no annealing
+```
+
+---
+
+## 13. Phase 12: Training at Scale
 
 ### Hardware Requirements
 
@@ -809,7 +1518,7 @@ python -m supergpt.training.train \
 
 ---
 
-## 10. Phase 9: Post-Training (SFT + RLHF)
+## 14. Phase 13: Post-Training — SFT, DPO, RLHF
 
 After pre-training, the model can predict text but can't follow instructions. Post-training turns it into an assistant.
 
