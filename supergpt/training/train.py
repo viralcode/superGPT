@@ -496,17 +496,16 @@ if __name__ == "__main__":
                 hf_dataset=args.hf_dataset,
                 shard_dir=args.shard_dir or args.data_dir,
             )
-            _stream_iter = iter(_stream_loader)
+            _stream_state = [iter(_stream_loader)]
 
             # Override load_data to pull from streaming
             _original_load_data = load_data
             def load_data_streaming(data_dir, split, block_size, batch_size, device):
-                nonlocal _stream_iter
                 try:
-                    batch = next(_stream_iter)
+                    batch = next(_stream_state[0])
                 except StopIteration:
-                    _stream_iter = iter(_stream_loader)
-                    batch = next(_stream_iter)
+                    _stream_state[0] = iter(_stream_loader)
+                    batch = next(_stream_state[0])
                 x, y = batch[:, :-1], batch[:, 1:]
                 return x.to(device), y.to(device)
 

@@ -149,6 +149,23 @@ def load_tokenizer(data_dir: str, checkpoint=None):
         from data.prepare_data import TiktokenWrapper
         tokenizer = TiktokenWrapper()
         print(f"Loaded tiktoken tokenizer (vocab_size={tokenizer.vocab_size})")
+    elif tokenizer_type == "huggingface":
+        tokenizer_name = meta.get("tokenizer_name", "Qwen/Qwen2.5-0.5B")
+        try:
+            from transformers import AutoTokenizer
+            hf_tok = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+            class HFTokenizerWrapper:
+                def __init__(self, hf_tok):
+                    self.hf_tok = hf_tok
+                    self.vocab_size = hf_tok.vocab_size
+                def encode(self, text):
+                    return self.hf_tok.encode(text)
+                def decode(self, tokens):
+                    return self.hf_tok.decode(tokens, skip_special_tokens=True)
+            tokenizer = HFTokenizerWrapper(hf_tok)
+            print(f"Loaded HuggingFace tokenizer: {tokenizer_name} (vocab_size={tokenizer.vocab_size})")
+        except Exception as e:
+            raise ValueError(f"Could not load HF tokenizer '{tokenizer_name}': {e}")
     else:
         raise ValueError(f"Unknown tokenizer type: {tokenizer_type}")
 
