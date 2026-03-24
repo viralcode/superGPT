@@ -504,11 +504,18 @@ def prepare_filtered_data(
     else:
         ds = load_dataset(dataset_name, **kwargs)
 
-    # Tokenize with filtering
+    # Tokenize with filtering — CHUNKED WRITES to avoid OOM
+    # Instead of accumulating all tokens in a Python list (which uses ~28 bytes
+    # per int = 28GB for 1B tokens), we write to disk in chunks of 10M tokens.
     print("Tokenizing with quality filtering...")
-    all_ids = []
+    CHUNK_SIZE = 10_000_000  # Write every 10M tokens
+    chunk_buffer = []
     total_tokens = 0
     t0 = time.time()
+
+    # Temporary file for streaming writes
+    tmp_path = os.path.join(output_dir, "tokens_tmp.bin")
+    tmp_file = open(tmp_path, "wb")
 
     for i, sample in enumerate(ds):
         text = sample.get(text_field, "")
@@ -528,8 +535,14 @@ def prepare_filtered_data(
         if not ids:
             continue
 
-        all_ids.extend(ids)
+        chunk_buffer.extend(ids)
         total_tokens += len(ids)
+
+        # Flush chunk to disk when buffer is large enough
+        if len(chunk_buffer) >= CHUNK_SIZE:
+            arr = np.array(chunk_buffer, dtype=np.uint32)
+            arr.tofile(tmp_file)
+            chunk_buffer = []
 
         if (i + 1) % 10000 == 0:
             elapsed = time.time() - t0
@@ -540,28 +553,43 @@ def prepare_filtered_data(
             print(f"  Reached token limit: {max_tokens:,}")
             break
 
+    # Flush remaining tokens
+    if chunk_buffer:
+        arr = np.array(chunk_buffer, dtype=np.uint32)
+        arr.tofile(tmp_file)
+        chunk_buffer = []
+
+    tmp_file.close()
+
     # Print filter stats
     qf.print_stats()
     dedup.print_stats()
 
-    # Split train/val
-    split_idx = int(len(all_ids) * (1 - val_fraction))
-    train_ids = all_ids[:split_idx]
-    val_ids = all_ids[split_idx:]
+    # Split train/val using memory-mapped file (no RAM spike)
+    print(f"\n  Total tokens: {total_tokens:,}")
+    all_tokens = np.memmap(tmp_path, dtype=np.uint32, mode='r')
+    split_idx = int(len(all_tokens) * (1 - val_fraction))
 
-    print(f"\n  Train tokens: {len(train_ids):,}")
-    print(f"  Val tokens:   {len(val_ids):,}")
+    print(f"  Train tokens: {split_idx:,}")
+    print(f"  Val tokens:   {len(all_tokens) - split_idx:,}")
 
-    # Save
-    train_arr = np.array(train_ids, dtype=np.uint32)
-    val_arr = np.array(val_ids, dtype=np.uint32)
-
+    # Save train/val splits
     train_path = os.path.join(output_dir, "train.bin")
     val_path = os.path.join(output_dir, "val.bin")
     meta_path = os.path.join(output_dir, "meta.pkl")
 
-    train_arr.tofile(train_path)
-    val_arr.tofile(val_path)
+    # Copy slices efficiently using memmap
+    train_tokens = np.array(all_tokens[:split_idx], dtype=np.uint32)
+    train_tokens.tofile(train_path)
+    del train_tokens
+
+    val_tokens = np.array(all_tokens[split_idx:], dtype=np.uint32)
+    val_tokens.tofile(val_path)
+    del val_tokens
+
+    # Cleanup temp file
+    del all_tokens
+    os.remove(tmp_path)
 
     meta = {
         "tokenizer_type": "huggingface",
