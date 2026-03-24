@@ -159,12 +159,20 @@ def distill(
     print(f"  Student: {student_params/1e6:.1f}M params "
           f"({teacher_params/student_params:.1f}× compression)")
 
-    # Load data
+    # Load data — auto-detect dtype from meta.pkl
     block_size = teacher_config.block_size
+    data_dtype = np.uint16  # default
+    meta_path = os.path.join(data_dir, "meta.pkl")
+    if os.path.exists(meta_path):
+        import pickle
+        with open(meta_path, "rb") as f:
+            meta = pickle.load(f)
+        if meta.get("vocab_size", 0) > 65535 or meta.get("tokenizer_type") == "tiktoken":
+            data_dtype = np.uint32
     train_data = np.memmap(os.path.join(data_dir, "train.bin"),
-                           dtype=np.uint16, mode="r")
+                           dtype=data_dtype, mode="r")
     val_data = np.memmap(os.path.join(data_dir, "val.bin"),
-                         dtype=np.uint16, mode="r")
+                         dtype=data_dtype, mode="r")
 
     def get_batch(split):
         data = train_data if split == "train" else val_data

@@ -343,12 +343,13 @@ def load_data(data_dir: str, split: str, block_size: int, batch_size: int, devic
     """Load a batch of data from the memory-mapped binary file."""
     data_path = os.path.join(data_dir, f"{split}.bin")
 
-    # Detect dtype from meta.pkl
+    # Detect dtype from meta.pkl — use uint32 if vocab > 65535
     meta_path = os.path.join(data_dir, "meta.pkl")
     if os.path.exists(meta_path):
         with open(meta_path, "rb") as f:
             meta = pickle.load(f)
-        if meta.get("tokenizer_type") == "tiktoken":
+        vocab_size = meta.get("vocab_size", 0)
+        if vocab_size > 65535 or meta.get("tokenizer_type") == "tiktoken":
             dtype = np.uint32
         else:
             dtype = np.uint16

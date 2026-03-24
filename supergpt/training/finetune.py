@@ -41,7 +41,8 @@ def load_data(data_dir: str, split: str, block_size: int, batch_size: int, devic
     if os.path.exists(meta_path):
         with open(meta_path, "rb") as f:
             meta = pickle.load(f)
-        if meta.get("tokenizer_type") == "tiktoken":
+        vocab_size = meta.get("vocab_size", 0)
+        if vocab_size > 65535 or meta.get("tokenizer_type") == "tiktoken":
             dtype = np.uint32
         else:
             dtype = np.uint16
