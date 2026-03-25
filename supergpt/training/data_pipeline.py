@@ -115,73 +115,79 @@ def prepare_data(
     print(f"  Shard size: {shard_size:,} tokens ({shard_size * 4 / 1e6:.0f}MB each)")
     print(f"{'='*60}")
 
-    # Load dataset (streaming for large datasets)
+    # Always stream — never download full dataset to disk.
+    # sample-10BT is 30GB+ and would fill a 50GB RunPod disk.
+    # Streaming uses zero disk for source data.
     print(f"\nLoading dataset...")
-    kwargs = {"split": "train"}
-    if max_tokens > 500_000_000:
-        kwargs["streaming"] = True
-        print("  Mode: streaming (large dataset)")
-    else:
-        print("  Mode: download + cache")
+    kwargs = {"split": "train", "streaming": True}
+    print("  Mode: streaming (zero disk for source data)")
 
     if subset:
         ds = load_dataset(dataset_name, subset, **kwargs)
     else:
         ds = load_dataset(dataset_name, **kwargs)
 
-    # Setup multiprocessing
-    if num_workers == 0:
-        num_workers = max(1, os.cpu_count() - 2)
-    print(f"  Workers: {num_workers}")
+    # Setup tokenizer (single process — streaming datasets can't use mp.Pool)
+    from transformers import AutoTokenizer as _AT
+    _tokenizer = _AT.from_pretrained(tokenizer_name, trust_remote_code=True)
+    print(f"  Tokenizer loaded")
 
     # Pre-allocate shard buffer (constant memory!)
     shard_buffer = np.empty((shard_size,), dtype=np.uint32)
     token_count = 0
     shard_index = 0
     total_tokens = 0
+    n_docs = 0
     t0 = time.time()
 
     print(f"\nTokenizing...")
 
-    # Use multiprocessing for parallel tokenization
-    with mp.Pool(num_workers, initializer=_init_worker, initargs=(tokenizer_name,)) as pool:
-        for tokens in pool.imap(tokenize_doc, ds, chunksize=16):
-            if len(tokens) == 0:
-                continue
+    for sample in ds:
+        text = sample.get(text_field, "")
+        if not text or len(text.strip()) < 50:
+            continue
 
-            # Will these tokens fit in the current shard?
-            if token_count + len(tokens) < shard_size:
-                # Append to current shard buffer
-                shard_buffer[token_count:token_count + len(tokens)] = tokens
-                token_count += len(tokens)
-            else:
-                # Fill current shard, write to disk, start new one
-                remainder = shard_size - token_count
-                shard_buffer[token_count:token_count + remainder] = tokens[:remainder]
+        # Tokenize
+        ids = _tokenizer.encode(text, add_special_tokens=False)
+        ids = [t for t in ids if t != 0]
+        if not ids:
+            continue
 
-                # First shard = validation, rest = training
-                split = "val" if shard_index == 0 else "train"
-                filename = os.path.join(output_dir, f"{split}_{shard_index:06d}.bin")
-                shard_buffer.tofile(filename)
+        tokens = np.array(ids, dtype=np.uint32)
+        n_docs += 1
 
-                elapsed = time.time() - t0
-                total_tokens += shard_size
-                tps = total_tokens / elapsed
-                print(f"  Shard {shard_index:>3d} | {split:>5s} | "
-                      f"{total_tokens:>12,} tokens | {tps:,.0f} tok/s | "
-                      f"{os.path.getsize(filename) / 1e6:.1f}MB")
+        # Will these tokens fit in the current shard?
+        if token_count + len(tokens) < shard_size:
+            shard_buffer[token_count:token_count + len(tokens)] = tokens
+            token_count += len(tokens)
+        else:
+            # Fill current shard, write to disk, start new one
+            remainder = shard_size - token_count
+            shard_buffer[token_count:token_count + remainder] = tokens[:remainder]
 
-                shard_index += 1
+            # First shard = validation, rest = training
+            split = "val" if shard_index == 0 else "train"
+            filename = os.path.join(output_dir, f"{split}_{shard_index:06d}.bin")
+            shard_buffer.tofile(filename)
 
-                # Start new shard with leftover tokens
-                leftover = len(tokens) - remainder
-                shard_buffer[:leftover] = tokens[remainder:]
-                token_count = leftover
+            elapsed = time.time() - t0
+            total_tokens += shard_size
+            tps = total_tokens / elapsed if elapsed > 0 else 0
+            print(f"  Shard {shard_index:>3d} | {split:>5s} | "
+                  f"{total_tokens:>12,} tokens | {tps:,.0f} tok/s | "
+                  f"{n_docs:,} docs")
 
-            # Check token limit
-            if total_tokens + token_count >= max_tokens:
-                print(f"  Reached target: {max_tokens:,} tokens")
-                break
+            shard_index += 1
+
+            # Start new shard with leftover tokens
+            leftover = len(tokens) - remainder
+            shard_buffer[:leftover] = tokens[remainder:]
+            token_count = leftover
+
+        # Check token limit
+        if total_tokens + token_count >= max_tokens:
+            print(f"  Reached target: {max_tokens:,} tokens")
+            break
 
     # Write final partial shard
     if token_count > 0:
