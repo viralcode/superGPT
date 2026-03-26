@@ -119,15 +119,6 @@ class CheckpointManager:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-        # Save periodic numbered checkpoint
-        if iter_num > 0 and iter_num % 2000 == 0:
-            numbered_path = os.path.join(
-                self.checkpoint_dir, f"step_{iter_num}.pt"
-            )
-            if os.path.exists(numbered_path):
-                os.remove(numbered_path)
-            shutil.copy2(target_path, numbered_path)
-
         # Save best
         if is_best:
             best_path = os.path.join(self.checkpoint_dir, "best.pt")
@@ -135,16 +126,9 @@ class CheckpointManager:
                 os.remove(best_path)
             shutil.copy2(target_path, best_path)
 
-        # Rotate old checkpoints
-        self._rotate_checkpoints()
-
     def _rotate_checkpoints(self):
-        """Keep only the last N numbered checkpoints."""
-        pattern = os.path.join(self.checkpoint_dir, "step_*.pt")
-        checkpoints = sorted(glob.glob(pattern))
-        while len(checkpoints) > self.max_keep:
-            oldest = checkpoints.pop(0)
-            os.remove(oldest)
+        """Keep only the last N numbered checkpoints (Disabled to save disk space)."""
+        pass
 
     def find_latest(self) -> str:
         """Find the latest checkpoint for auto-resume."""
