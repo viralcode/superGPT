@@ -11,6 +11,7 @@ env/
 # Training checkpoints (too large for git, use GitHub Releases)
 checkpoints/
 *.pt
+trained_models/
 
 # IDE
 .vscode/
